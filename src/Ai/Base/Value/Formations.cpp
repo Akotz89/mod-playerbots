@@ -287,7 +287,7 @@ public:
         if (!group)
             return Formation::NullLocation;
 
-        float range = sPlayerbotAIConfig.GetFormationSpacing(bot);
+        float range = sPlayerbotAIConfig.followDistance;
 
         Player* master = GetMaster();
         if (!master)
@@ -340,8 +340,6 @@ public:
 
         return Formation::NullLocation;
     }
-
-    float GetMaxDistance() override { return sPlayerbotAIConfig.GetFormationSpacing(bot); }
 };
 
 class FarFormation : public FollowFormation
