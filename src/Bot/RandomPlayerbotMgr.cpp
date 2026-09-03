@@ -2448,6 +2448,30 @@ void RandomPlayerbotMgr::SetValue(Player* bot, std::string const& type, uint32 v
     SetValue(bot->GetGUID().GetCounter(), type, value, data);
 }
 
+bool RandomPlayerbotMgr::PopulationRequestSession(uint32 characterGuid)
+{
+    if (!characterGuid)
+        return false;
+    if (currentBots.contains(characterGuid))
+        return true;
+    SetEventValue(characterGuid, "add", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+    SetEventValue(characterGuid, "logout", 0, 0);
+    currentBots.insert(characterGuid);
+    return true;
+}
+
+bool RandomPlayerbotMgr::PopulationReleaseSession(uint32 characterGuid)
+{
+    if (!characterGuid)
+        return false;
+    SetEventValue(characterGuid, "add", 0, 0);
+    SetEventValue(characterGuid, "logout", 0, 0);
+    currentBots.erase(characterGuid);
+    if (GetPlayerBot(characterGuid))
+        LogoutPlayerBot(ObjectGuid::Create<HighGuid::Player>(characterGuid));
+    return true;
+}
+
 bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* /*handler*/, char const* args)
 {
     if (!sPlayerbotAIConfig.enabled)

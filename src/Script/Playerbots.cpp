@@ -529,9 +529,11 @@ void AddSC_HyjalSummitBotScripts();
 void AddSC_IcecrownBotScripts();
 void AddSC_RubySanctumBotScripts();
 void AddSC_randombot_level_mgr();
+void RegisterPythonPopulationBridge();
 
 void AddPlayerbotsScripts()
 {
+    RegisterPythonPopulationBridge();
     new PlayerbotsBattlefieldScript();
     new PlayerbotsDatabaseScript();
     new PlayerbotsPlayerScript();

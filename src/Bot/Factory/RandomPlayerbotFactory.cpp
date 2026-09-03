@@ -21,6 +21,8 @@
 #include "SharedDefines.h"
 #include "SocialMgr.h"
 #include "Timer.h"
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <openssl/sha.h>
@@ -62,6 +64,53 @@ bool RandomPlayerbotFactory::IsValidRaceClassCombination(uint8 race, uint8 cls, 
 
     PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, cls);
     return info != nullptr;
+}
+
+uint32 RandomPlayerbotFactory::EnsureManifestBot(uint32 accountId, ManifestCharacterSpec const& spec)
+{
+    if (!accountId || spec.level != 1 || spec.name.size() < 2 || spec.name.size() > 12 ||
+        !std::all_of(spec.name.begin(), spec.name.end(), [](unsigned char value) { return std::isalpha(value); }) ||
+        !IsValidRaceClassCombination(spec.race, spec.cls, EXPANSION_WRATH_OF_THE_LICH_KING) ||
+        spec.cls == CLASS_DEATH_KNIGHT)
+        return 0;
+
+    if (QueryResult existing = CharacterDatabase.Query(
+            "SELECT guid, account, race, class, level, gender, playerBytes, playerBytes2 "
+            "FROM characters WHERE name = '{}'", spec.name))
+    {
+        Field* fields = existing->Fetch();
+        uint32 playerBytes = fields[6].Get<uint32>();
+        uint32 playerBytes2 = fields[7].Get<uint32>();
+        bool exact = fields[1].Get<uint32>() == accountId && fields[2].Get<uint8>() == spec.race &&
+                     fields[3].Get<uint8>() == spec.cls && fields[4].Get<uint8>() == 1 &&
+                     fields[5].Get<uint8>() == spec.gender && (playerBytes & 0xFF) == spec.skin &&
+                     ((playerBytes >> 8) & 0xFF) == spec.face &&
+                     ((playerBytes >> 16) & 0xFF) == spec.hairStyle &&
+                     ((playerBytes >> 24) & 0xFF) == spec.hairColor &&
+                     (playerBytes2 & 0xFF) == spec.facialHair;
+        return exact ? fields[0].Get<uint32>() : 0;
+    }
+
+    WorldSession session(accountId, "", 0x0, nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING,
+                         time_t(0), LOCALE_enUS, 0, false, false, 0, true);
+    CharacterCreateInfo characterInfo(spec.name, spec.race, spec.cls, spec.gender, spec.skin,
+                                      spec.face, spec.hairStyle, spec.hairColor, spec.facialHair);
+    std::unique_ptr<Player> player = std::make_unique<Player>(&session);
+    player->GetMotionMaster()->Initialize();
+    if (!player->Create(sObjectMgr->GetGenerator<HighGuid::Player>().Generate(), &characterInfo))
+    {
+        player->CleanupsBeforeDelete();
+        return 0;
+    }
+    player->setCinematic(2);
+    player->SetAtLoginFlag(AT_LOGIN_NONE);
+    player->SaveToDB(true, false);
+    uint32 guid = player->GetGUID().GetCounter();
+    sCharacterCache->AddCharacterCacheEntry(player->GetGUID(), accountId, player->GetName(),
+                                             player->getGender(), player->getRace(),
+                                             player->getClass(), player->GetLevel());
+    player->CleanupsBeforeDelete();
+    return guid;
 }
 
 Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& nameCache)
