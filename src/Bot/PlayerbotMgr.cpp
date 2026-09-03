@@ -567,7 +567,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
             PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
         }
     }
-    else if (restoreGroup && master && !group)
+    else if (master && !group)
     {
         // Queue group creation and AddMember operation
         auto inviteOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
