@@ -631,7 +631,7 @@ AiPlayerbot.AutoGearScoreLimit = 0
 AiPlayerbot.BotCheats = "food,taxi,raid"
 
 # List of attunement quests (comma-separated list of quest IDs) that are automatically completed for all bots.
-# While mod-playerbots does not restore removed attunement requirements, other mods, such as mod-individual-progression, may do so.
+# While mod-playerbots does not restore removed attunement requirements, another optional content module may do so.
 # This is meant to exclude bots from such requirements.
 #
 # Defaults:
