@@ -8,6 +8,7 @@
 #include "BisListMgr.h"
 #include "Config.h"
 #include "NewRpgInfo.h"
+#include "Player.h"
 #include "PlayerbotDungeonRepository.h"
 #include "PlayerbotFactory.h"
 #include "PlayerbotGuildMgr.h"
@@ -17,6 +18,8 @@
 #include "RandomPlayerbotMgr.h"
 #include "Talentspec.h"
 #include "TravelMgr.h"
+#include "WorldSession.h"
+#include <array>
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -242,6 +245,8 @@ bool PlayerbotAIConfig::Initialize()
 
     botAutologin = sConfigMgr->GetOption<bool>("AiPlayerbot.BotAutologin", false);
     randomBotAutologin = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotAutologin", true);
+    randomBotPersistentProgression =
+        sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotPersistentProgression", false);
     minRandomBots = sConfigMgr->GetOption<int32>("AiPlayerbot.MinRandomBots", 500);
     maxRandomBots = sConfigMgr->GetOption<int32>("AiPlayerbot.MaxRandomBots", 500);
     randomBotUpdateInterval = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotUpdateInterval", 20);
@@ -574,6 +579,10 @@ bool PlayerbotAIConfig::Initialize()
     LOG_INFO("playerbots", "Loading World Buff Feature...");
 
     randomBotAccountPrefix = sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotAccountPrefix", "rndbot");
+    randomBotFactorySealedIdentityFile =
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.RandomBotFactory.SealedIdentityFile", "");
+    randomBotPersistentProgression =
+        randomBotPersistentProgression || !randomBotFactorySealedIdentityFile.empty();
     randomBotAccountCount = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotAccountCount", 0);
     deleteRandomBotAccounts = sConfigMgr->GetOption<bool>("AiPlayerbot.DeleteRandomBotAccounts", false);
     randomBotGuildCount = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotGuildCount", 20);
@@ -637,6 +646,7 @@ bool PlayerbotAIConfig::Initialize()
     allowSummonWhenBotIsDead = sConfigMgr->GetOption<bool>("AiPlayerbot.AllowSummonWhenBotIsDead", true);
     reviveBotWhenSummoned = sConfigMgr->GetOption<int32>("AiPlayerbot.ReviveBotWhenSummoned", 1);
     botRepairWhenSummon = sConfigMgr->GetOption<bool>("AiPlayerbot.BotRepairWhenSummon", true);
+    freeRepairOnRelease = sConfigMgr->GetOption<bool>("AiPlayerbot.FreeRepairOnRelease", false);
     autoInitOnly = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoInitOnly", false);
     resetInstanceIdForAltBots = sConfigMgr->GetOption<bool>("AiPlayerbot.ResetInstanceIdForAltBots", false);
     autoInitEquipLevelLimitRatio = sConfigMgr->GetOption<float>("AiPlayerbot.AutoInitEquipLevelLimitRatio", 1.0);

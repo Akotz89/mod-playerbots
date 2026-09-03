@@ -339,7 +339,11 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             break;
         case CLASS_PALADIN:
             if (tab == PALADIN_TAB_PROTECTION)
-                engine->addStrategiesNoInit("tank", "tank assist", "pull", "pull back", "bthreat", "barmor", "cure", nullptr);
+            {
+                engine->addStrategiesNoInit("tank", "tank assist", "bthreat", "barmor", "cure", nullptr);
+                if (sPlayerbotAIConfig.ShouldAllowAutonomousPull(player))
+                    engine->addStrategiesNoInit("pull", "pull back", nullptr);
+            }
             else if (tab == PALADIN_TAB_HOLY)
                 engine->addStrategiesNoInit("heal", "dps assist", "cure", "bcast", nullptr);
             else // if (tab == PALADIN_TAB_RETRIBUTION)
@@ -514,7 +518,9 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
         case CLASS_PALADIN:
             if (tab == PALADIN_TAB_PROTECTION)
             {
-                nonCombatEngine->addStrategiesNoInit("bthreat", "tank assist", "pull", "barmor", nullptr);
+                nonCombatEngine->addStrategiesNoInit("bthreat", "tank assist", "barmor", nullptr);
+                if (sPlayerbotAIConfig.ShouldAllowAutonomousPull(player))
+                    nonCombatEngine->addStrategy("pull", false);
                 if (player->GetLevel() >= 20)
                     nonCombatEngine->addStrategy("bsanc", false);
                 else

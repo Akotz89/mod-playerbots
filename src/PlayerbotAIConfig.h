@@ -76,6 +76,8 @@ enum NewRpgStatus : int
 
 #define MAX_SPECNO 20
 
+class Player;
+
 // One level range/bucket used by the random bot level brackets sub-feature (see RandomBotLevelMgr).
 struct LevelBracketConfig
 {
@@ -133,6 +135,7 @@ public:
 
     uint32 openGoSpell;
     bool randomBotAutologin;
+    bool randomBotPersistentProgression;
     bool botAutologin;
     std::string randomBotMapsAsString;
     float probTeleToBankers;
@@ -294,6 +297,7 @@ public:
 
     std::string commandPrefix, commandSeparator;
     std::string randomBotAccountPrefix;
+    std::string randomBotFactorySealedIdentityFile;
     uint32 randomBotAccountCount;
     bool randomBotRandomPassword;
     bool deleteRandomBotAccounts;
@@ -418,6 +422,7 @@ public:
     bool allowSummonWhenBotIsDead;
     int reviveBotWhenSummoned;
     bool botRepairWhenSummon;
+    bool freeRepairOnRelease;
     bool autoInitOnly;
     bool resetInstanceIdForAltBots;
     float autoInitEquipLevelLimitRatio;

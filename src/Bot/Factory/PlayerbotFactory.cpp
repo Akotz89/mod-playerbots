@@ -35,6 +35,7 @@
 #include "SharedDefines.h"
 #include "StatsWeightCalculator.h"
 #include "World.h"
+#include "WorldSession.h"
 #include <array>
 #include <utility>
 
@@ -64,6 +65,12 @@ std::vector<uint32> PlayerbotFactory::ccBreakTrinketCache;
 
 namespace
 {
+bool IsPersistentRandomBot(Player const* bot)
+{
+    return sPlayerbotAIConfig.randomBotPersistentProgression && bot && bot->GetSession() &&
+           sPlayerbotAIConfig.IsInRandomAccountList(bot->GetSession()->GetAccountId());
+}
+
 constexpr uint32 SPELL_DRUID_THICK_HIDE = 16931;
 constexpr uint32 SPELL_OWLKIN_FRENZY = 48393;
 constexpr uint32 SPELL_PRIMAL_TENACITY = 33957;
@@ -613,6 +620,13 @@ void PlayerbotFactory::Prepare()
 
 void PlayerbotFactory::Randomize(bool incremental)
 {
+    if (IsPersistentRandomBot(bot))
+    {
+        LOG_DEBUG("playerbots", "Skipped {} factory randomize for persistent randombot {}",
+                  incremental ? "incremental" : "full", bot->GetName());
+        return;
+    }
+
     // if (sPlayerbotAIConfig.disableRandomLevels)
     //     return;
 
@@ -642,7 +656,8 @@ void PlayerbotFactory::Randomize(bool incremental)
             ClearAllItems();
         }
     }
-    ClearInventory();
+    if (!sPlayerbotAIConfig.equipAndSpecPersistence)
+        ClearInventory();
     bot->RemoveAllSpellCooldown();
     UnbindInstance();
 
@@ -877,6 +892,12 @@ void PlayerbotFactory::Randomize(bool incremental)
 
 void PlayerbotFactory::Refresh()
 {
+    if (IsPersistentRandomBot(bot))
+    {
+        LOG_DEBUG("playerbots", "Skipped factory refresh for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     // Prepare();
     // if (!sPlayerbotAIConfig.equipAndSpecPersistence ||
     //     bot->GetLevel() < sPlayerbotAIConfig.equipAndSpecPersistenceLevel)
@@ -1436,6 +1457,12 @@ void PlayerbotFactory::ClearSkills()
 
 void PlayerbotFactory::ClearEverything()
 {
+    if (IsPersistentRandomBot(bot))
+    {
+        LOG_WARN("playerbots", "Refused factory clear for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     bot->GiveLevel(bot->getClass() == CLASS_DEATH_KNIGHT ? sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL)
                                                          : sWorld->getIntConfig(CONFIG_START_PLAYER_LEVEL));
     bot->SetUInt32Value(PLAYER_XP, 0);
@@ -2698,7 +2725,7 @@ void PlayerbotFactory::EnchantItem(Item* item)
             uint8 sp = 0;
             uint8 ap = 0;
             uint8 tank = 0;
-            for (uint8 i = ITEM_MOD_MANA; i < MAX_ITEM_MOD; ++i)
+            for (uint8 i = 0; i < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++i)
             {
                 if (enchant->type[i] != ITEM_ENCHANTMENT_TYPE_STAT)
                     continue;
@@ -3246,6 +3273,33 @@ void PlayerbotFactory::InitAvailableSpells()
                 continue;
 
             if (!trainer->CanTeachSpell(bot, trainerSpell))
+                continue;
+
+            if (trainerSpell->IsCastable())
+                bot->CastSpell(bot, trainerSpell->SpellId, true);
+            else
+                bot->learnSpell(trainerSpell->SpellId, false);
+        }
+    }
+}
+
+void PlayerbotFactory::InitAvailableClassSpells()
+{
+    CreatureTemplateContainer const* creatureTemplateContainer = sObjectMgr->GetCreatureTemplates();
+    for (CreatureTemplateContainer::const_iterator i = creatureTemplateContainer->begin();
+         i != creatureTemplateContainer->end(); ++i)
+    {
+        Trainer::Trainer* trainer = sObjectMgr->GetTrainer(i->first);
+        if (!trainer || trainer->GetTrainerType() != Trainer::Type::Class ||
+            !trainer->IsTrainerValidForPlayer(bot))
+        {
+            continue;
+        }
+
+        for (auto& spell : trainer->GetSpells())
+        {
+            Trainer::Spell const* trainerSpell = trainer->GetSpell(spell.SpellId);
+            if (!trainerSpell || !trainer->CanTeachSpell(bot, trainerSpell))
                 continue;
 
             if (trainerSpell->IsCastable())

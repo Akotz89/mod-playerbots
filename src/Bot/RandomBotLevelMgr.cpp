@@ -916,6 +916,9 @@ void RandomBotLevelMgr::RunResetPlayedTimeCheck()
 
 void RandomBotLevelMgr::Update(uint32 diff)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
+        return;
+
     if (sPlayerbotAIConfig.levelBracketsEnabled)
     {
         _bracketsTimer += diff;
@@ -949,6 +952,9 @@ void RandomBotLevelMgr::Update(uint32 diff)
 void RandomBotLevelMgr::OnBotLogin(Player* player)
 {
     if (!sRandomPlayerbotMgr.IsRandomBot(player))
+        return;
+
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
         return;
 
     if (IsNameInExcludeList(player, sPlayerbotAIConfig.resetBotLevelExcludeNames))

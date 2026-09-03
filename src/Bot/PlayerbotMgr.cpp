@@ -12,6 +12,7 @@
 #include "DatabaseEnv.h"
 #include "Define.h"
 #include "Group.h"
+#include "Formations.h"
 #include "GuildMgr.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
@@ -566,7 +567,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
             PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
         }
     }
-    else if (master && !group)
+    else if (restoreGroup && master && !group)
     {
         // Queue group creation and AddMember operation
         auto inviteOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
@@ -590,7 +591,8 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
 
     bot->SaveToDB(false, false);
     bool addClassBot = sRandomPlayerbotMgr.IsAccountType(accountId, 2);
-    if (addClassBot && master && abs((int)master->GetLevel() - (int)bot->GetLevel()) > 3)
+    if (addClassBot && master && !sPlayerbotAIConfig.disableRandomLevels &&
+        abs((int)master->GetLevel() - (int)bot->GetLevel()) > 3)
     {
         // PlayerbotFactory factory(bot, master->GetLevel());
         // factory.Randomize(false);

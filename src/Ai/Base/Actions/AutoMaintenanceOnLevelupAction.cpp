@@ -36,7 +36,7 @@ void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
 
 void AutoMaintenanceOnLevelupAction::AutoPickTalents()
 {
-    if (!sPlayerbotAIConfig.autoPickTalents || !sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (bot->GetFreeTalentPoints() <= 0)
         return;
 
     if (bot->GetFreeTalentPoints() <= 0)
@@ -161,6 +161,9 @@ std::string const AutoMaintenanceOnLevelupAction::FormatSpell(SpellInfo const* s
 void AutoMaintenanceOnLevelupAction::AutoUpgradeEquip()
 {
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
         return;
 
     PlayerbotFactory factory(bot, bot->GetLevel());
