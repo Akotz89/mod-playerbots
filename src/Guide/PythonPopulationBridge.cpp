@@ -7,6 +7,7 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
+#include "Playerbots.h"
 #include "ProgressionSystem.h"
 #include "RandomPlayerbotFactory.h"
 #include "RandomPlayerbotMgr.h"
