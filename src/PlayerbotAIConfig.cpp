@@ -974,6 +974,26 @@ bool PlayerbotAIConfig::IsInPvpProhibitedArea(uint32 id)
     return find(pvpProhibitedAreaIds.begin(), pvpProhibitedAreaIds.end(), id) != pvpProhibitedAreaIds.end();
 }
 
+bool PlayerbotAIConfig::IsDeathKnightLoginDisabled() const
+{
+    return disableDeathKnightLogin;
+}
+
+bool PlayerbotAIConfig::ShouldPreferClassArmorType(Player const* /*player*/) const
+{
+    return preferClassArmorType;
+}
+
+bool PlayerbotAIConfig::ShouldPreferSpecWeapons(Player const* /*player*/) const
+{
+    return preferredSpecWeapons;
+}
+
+bool PlayerbotAIConfig::ShouldAllowAutonomousPull(Player const* /*player*/) const
+{
+    return true;
+}
+
 bool PlayerbotAIConfig::IsRestrictedHealerDPSMap(uint32 mapId) const
 {
     return restrictHealerDPS &&

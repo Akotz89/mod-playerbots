@@ -103,6 +103,10 @@ public:
     bool IsPvpProhibited(uint32 zoneId, uint32 areaId);
     bool IsInPvpProhibitedZone(uint32 id);
     bool IsInPvpProhibitedArea(uint32 id);
+    bool IsDeathKnightLoginDisabled() const;
+    bool ShouldPreferClassArmorType(Player const* player) const;
+    bool ShouldPreferSpecWeapons(Player const* player) const;
+    bool ShouldAllowAutonomousPull(Player const* player) const;
 
     bool enabled;
     bool disabledWithoutRealPlayer;
