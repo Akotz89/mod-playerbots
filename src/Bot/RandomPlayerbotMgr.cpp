@@ -512,6 +512,16 @@ void RandomPlayerbotMgr::AssignAccountTypes()
 
     LOG_INFO("playerbots", "Found {} total randombot accounts in database", allRandomBotAccounts.size());
 
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
+    {
+        rndBotTypeAccounts = allRandomBotAccounts;
+        LOG_INFO("playerbots",
+                 "Persistent randombot progression: using all {} existing prefixed accounts without "
+                 "account-type reassignment",
+                 rndBotTypeAccounts.size());
+        return;
+    }
+
     // Check existing assignments
     QueryResult existingAssignments = PlayerbotsDatabase.Query("SELECT account_id, account_type FROM playerbots_account_type");
     std::map<uint32, uint8> currentAssignments;
@@ -691,16 +701,15 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             uint32 guid;
             uint8 rClass;
             uint8 rRace;
+            uint8 level;
             uint32 accountId;
         };
         std::vector<CharacterInfo> allCharacters;
 
         for (uint32 accountId : accountsToUse)
         {
-            CharacterDatabasePreparedStatement* stmt =
-                CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARS_BY_ACCOUNT_ID);
-            stmt->SetData(0, accountId);
-            PreparedQueryResult result = CharacterDatabase.Query(stmt);
+            QueryResult result = CharacterDatabase.Query(
+                "SELECT guid, class, race, level FROM characters WHERE account = {}", accountId);
             if (!result)
                 continue;
 
@@ -711,6 +720,7 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 info.guid = fields[0].Get<uint32>();
                 info.rClass = fields[1].Get<uint8>();
                 info.rRace = fields[2].Get<uint8>();
+                info.level = fields[3].Get<uint8>();
                 info.accountId = accountId;
                 allCharacters.push_back(info);
             } while (result->NextRow());
@@ -732,14 +742,21 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 hordeChars.push_back(charInfo);
         }
 
+        bool const deathKnightLoginDisabled = sPlayerbotAIConfig.IsDeathKnightLoginDisabled();
+
         // Lambda to handle bot login logic
         auto tryLoginBot = [&](const CharacterInfo& charInfo) -> bool
         {
+            uint32 syncedLevelCap = std::max<uint32>(
+                sPlayerbotAIConfig.randomBotMinLevel,
+                playersLevel ? playersLevel : sPlayerbotAIConfig.randombotStartingLevel);
+
             if (GetEventValue(charInfo.guid, "add") ||
                 GetEventValue(charInfo.guid, "logout") ||
                 GetPlayerBot(charInfo.guid) ||
                 currentBots.contains(charInfo.guid) ||
-                (sPlayerbotAIConfig.disableDeathKnightLogin && charInfo.rClass == CLASS_DEATH_KNIGHT))
+                (sPlayerbotAIConfig.syncLevelWithPlayers && charInfo.level > syncedLevelCap) ||
+                (deathKnightLoginDisabled && charInfo.rClass == CLASS_DEATH_KNIGHT))
             {
                 return false;
             }
@@ -1300,17 +1317,17 @@ void RandomPlayerbotMgr::CheckPlayers()
     {
         Player* player = *i;
 
-        if (player->IsGameMaster())
+        if (player->IsGameMaster() || (player->GetSession() && player->GetSession()->IsBot()))
             continue;
 
         // if (player->GetSession()->GetSecurity() > SEC_PLAYER)
         //     continue;
 
         if (player->GetLevel() > playersLevel)
-            playersLevel = player->GetLevel() + 3;
+            playersLevel = player->GetLevel();
     }
 
-    LOG_INFO("playerbots", "Max player level is {}, max bot level set to {}", playersLevel - 3, playersLevel);
+    LOG_INFO("playerbots", "Max player level is {}, max bot level set to {}", playersLevel, playersLevel);
 }
 
 void RandomPlayerbotMgr::ScheduleRandomize(uint32 bot, uint32 time) { SetEventValue(bot, "randomize", 1, time); }
@@ -1527,9 +1544,17 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
             // }
             // if (randomiser)
             // {
-            Randomize(bot);
-            LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: randomized", botId,
-                      bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
+            if (sPlayerbotAIConfig.randomBotPersistentProgression)
+            {
+                LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: persistent progression; periodic randomize skipped",
+                          botId, bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
+            }
+            else
+            {
+                Randomize(bot);
+                LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: randomized", botId,
+                          bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
+            }
             uint32 randomTime =
                 urand(sPlayerbotAIConfig.minRandomBotRandomizeTime, sPlayerbotAIConfig.maxRandomBotRandomizeTime);
             ScheduleRandomize(botId, randomTime);
@@ -1764,7 +1789,12 @@ void RandomPlayerbotMgr::Init()
 
 void RandomPlayerbotMgr::InitArenaTeams()
 {
-    if (sPlayerbotAIConfig.deleteRandomBotArenaTeams)
+    if (sPlayerbotAIConfig.deleteRandomBotArenaTeams && sPlayerbotAIConfig.randomBotPersistentProgression)
+    {
+        LOG_ERROR("playerbots",
+                  "AiPlayerbot.DeleteRandomBotArenaTeams is ignored because persistent randombot progression is enabled");
+    }
+    else if (sPlayerbotAIConfig.deleteRandomBotArenaTeams)
     {
         RandomPlayerbotFactory::DeleteBotArenaTeams();
         return;
@@ -1853,6 +1883,12 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot)
 
 void RandomPlayerbotMgr::Randomize(Player* bot)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        LOG_DEBUG("playerbots", "Skipped randomize for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     if (bot->InBattleground())
         return;
 
@@ -1875,6 +1911,12 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
 
 void RandomPlayerbotMgr::IncreaseLevel(Player* bot)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        LOG_WARN("playerbots", "Refused synthetic level increase for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     uint32 maxLevel = sPlayerbotAIConfig.randomBotMaxLevel;
     if (maxLevel > sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL))
         maxLevel = sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
@@ -1898,6 +1940,12 @@ void RandomPlayerbotMgr::IncreaseLevel(Player* bot)
 
 void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        LOG_WARN("playerbots", "Refused first/full randomize for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return;
@@ -1953,14 +2001,14 @@ void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 
     if (sPlayerbotAIConfig.disableRandomLevels)
     {
-        level = bot->getClass() == CLASS_DEATH_KNIGHT ? std::max(sPlayerbotAIConfig.randombotStartingLevel,
-                                                                 sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL))
-                                                      : sPlayerbotAIConfig.randombotStartingLevel;
+        // Fresh random bots are created at level 1. Once they begin playing, retain
+        // the level they actually earned instead of periodically rerolling it.
+        level = bot->GetLevel();
     }
 
     SetValue(bot, "level", level);
     PlayerbotFactory factory(bot, level);
-    factory.Randomize(false);
+    factory.Randomize(true);
 
     uint32 randomTime =
         urand(sPlayerbotAIConfig.minRandomBotRandomizeTime, sPlayerbotAIConfig.maxRandomBotRandomizeTime);
@@ -1993,6 +2041,12 @@ void RandomPlayerbotMgr::RandomizeFirst(Player* bot)
 
 void RandomPlayerbotMgr::RandomizeMin(Player* bot)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        LOG_WARN("playerbots", "Refused minimum-level randomize for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return;
@@ -2032,6 +2086,12 @@ void RandomPlayerbotMgr::RandomizeMin(Player* bot)
 
 void RandomPlayerbotMgr::Clear(Player* bot)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        LOG_WARN("playerbots", "Refused clear for persistent randombot {}", bot->GetName());
+        return;
+    }
+
     PlayerbotFactory factory(bot, bot->GetLevel());
     factory.ClearEverything();
 }
@@ -2089,6 +2149,20 @@ void RandomPlayerbotMgr::Refresh(Player* bot)
     PerfMonitorOperation* pmo = sPerfMonitor.start(PERF_MON_RNDBOT, "Refresh");
 
     botAI->Reset();
+
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && IsRandomBot(bot))
+    {
+        bot->SetPvP(sWorld->IsPvPRealm());
+
+        if (bot->GetGroup())
+            botAI->LeaveOrDisbandGroup();
+
+        LOG_DEBUG("playerbots", "Persistent randombot {} refreshed AI only; character state preserved",
+                  bot->GetName());
+        if (pmo)
+            pmo->finish();
+        return;
+    }
 
     bot->DurabilityRepairAll(false, 1.0f, false);
     bot->SetFullHealth();
@@ -2374,6 +2448,64 @@ void RandomPlayerbotMgr::SetValue(Player* bot, std::string const& type, uint32 v
     SetValue(bot->GetGUID().GetCounter(), type, value, data);
 }
 
+bool RandomPlayerbotMgr::PopulationRequestSession(uint32 characterGuid)
+{
+    if (!characterGuid || !sPlayerbotAIConfig.enabled)
+        return false;
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    if (Player* connected = ObjectAccessor::FindConnectedPlayer(guid))
+    {
+        // A human-owned session cannot be adopted by the population controller.
+        if (GetPlayerBot(characterGuid) != connected)
+            return false;
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(connected);
+        Player* master = ai ? ai->GetMaster() : nullptr;
+        return ai && (!master || GET_PLAYERBOT_AI(master)) && currentBots.contains(characterGuid);
+    }
+    if (auto loading = botLoading.find(guid); loading != botLoading.end())
+        return loading->second == 0 && currentBots.contains(characterGuid);
+    // Reuse the native asynchronous login primitive; the provider acknowledges
+    // only after the request is actually queued.
+    AddPlayerBot(guid, 0);
+    if (!botLoading.contains(guid))
+        return false;
+    SetEventValue(characterGuid, "add", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+    SetEventValue(characterGuid, "logout", 0, 0);
+    currentBots.insert(characterGuid);
+    return true;
+}
+
+bool RandomPlayerbotMgr::PopulationSessionExists(uint32 characterGuid) const
+{
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    return botLoading.contains(guid) || ObjectAccessor::FindConnectedPlayer(guid) != nullptr;
+}
+
+bool RandomPlayerbotMgr::PopulationReleaseSession(uint32 characterGuid)
+{
+    if (!characterGuid)
+        return false;
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    // A pending asynchronous login cannot yet acknowledge teardown.
+    if (botLoading.contains(guid))
+        return false;
+    if (Player* bot = GetPlayerBot(characterGuid))
+    {
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        Player* master = ai ? ai->GetMaster() : nullptr;
+        if (!ai || (master && !GET_PLAYERBOT_AI(master)) || bot->GetGroup() ||
+            bot->IsInCombat() || bot->GetMap()->IsDungeon())
+            return false;
+        LogoutPlayerBot(guid);
+        if (GetPlayerBot(characterGuid))
+            return false;
+    }
+    SetEventValue(characterGuid, "add", 0, 0);
+    SetEventValue(characterGuid, "logout", 0, 0);
+    currentBots.erase(characterGuid);
+    return true;
+}
+
 bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* /*handler*/, char const* args)
 {
     if (!sPlayerbotAIConfig.enabled)
@@ -2555,13 +2687,14 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
     }
 
     // Run guild recovery/assignment at login to handle empty guild tables after restart.
-    if (sPlayerbotAIConfig.randomBotGuildCount > 0)
+    if (!sPlayerbotAIConfig.randomBotPersistentProgression && sPlayerbotAIConfig.randomBotGuildCount > 0)
     {
         PlayerbotFactory factory(bot, bot->GetLevel());
         factory.InitGuild();
     }
 
-    RandomPlayerbotFactory::AssignBotToArenaTeam(bot);
+    if (!sPlayerbotAIConfig.randomBotPersistentProgression)
+        RandomPlayerbotFactory::AssignBotToArenaTeam(bot);
 
     if (sPlayerbotAIConfig.randomBotFixedLevel)
     {

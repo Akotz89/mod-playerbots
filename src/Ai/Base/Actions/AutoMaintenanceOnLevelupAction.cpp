@@ -36,10 +36,24 @@ void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
 
 void AutoMaintenanceOnLevelupAction::AutoPickTalents()
 {
-    if (!sPlayerbotAIConfig.autoPickTalents || !sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (bot->GetFreeTalentPoints() <= 0)
         return;
 
-    if (bot->GetFreeTalentPoints() <= 0)
+    if (sPlayerbotAIConfig.IsNamedPartyMember(bot))
+    {
+        if (!sPlayerbotAIConfig.namedPartyAutoTalents)
+            return;
+
+        int32 const specNo = sPlayerbotAIConfig.GetNamedPartySpecNo(bot);
+        if (specNo >= 0)
+        {
+            PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
+            botAI->ResetStrategies();
+        }
+        return;
+    }
+
+    if (!sPlayerbotAIConfig.autoPickTalents || !sRandomPlayerbotMgr.IsRandomBot(bot))
         return;
 
     PlayerbotFactory factory(bot, bot->GetLevel());
@@ -68,10 +82,23 @@ void AutoMaintenanceOnLevelupAction::AutoLearnSpell()
 void AutoMaintenanceOnLevelupAction::LearnSpells(std::ostringstream* out)
 {
     BroadcastHelper::BroadcastLevelup(botAI, bot);
-    if (sPlayerbotAIConfig.autoLearnTrainerSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
+    bool const randomBot = sRandomPlayerbotMgr.IsRandomBot(bot);
+    bool const namedPartyBot = sPlayerbotAIConfig.IsNamedPartyMember(bot);
+
+    if (randomBot && sPlayerbotAIConfig.randomBotPersistentProgression)
+        return;
+
+    if (sPlayerbotAIConfig.namedPartyAutoLearnTrainerSpells && namedPartyBot)
+    {
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        factory.InitAvailableClassSpells();
+        factory.InitClassSpells();
+    }
+    else if (sPlayerbotAIConfig.autoLearnTrainerSpells && randomBot)
         LearnTrainerSpells(out);
 
-    if (sPlayerbotAIConfig.autoLearnQuestSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
+    if ((sPlayerbotAIConfig.autoLearnQuestSpells && randomBot) ||
+        (sPlayerbotAIConfig.namedPartyAutoLearnClassQuestSpells && namedPartyBot))
         LearnQuestSpells(out);
 }
 
@@ -161,6 +188,9 @@ std::string const AutoMaintenanceOnLevelupAction::FormatSpell(SpellInfo const* s
 void AutoMaintenanceOnLevelupAction::AutoUpgradeEquip()
 {
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return;
+
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
         return;
 
     PlayerbotFactory factory(bot, bot->GetLevel());

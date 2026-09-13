@@ -112,6 +112,13 @@ float StatsWeightCalculator::CalculateItem(uint32 itemId, int32 randomPropertyId
 
     CalculateItemTypePenalty(proto);
 
+    if (sPlayerbotAIConfig.ShouldPreferClassArmorType(player_) && proto->Class == ITEM_CLASS_ARMOR &&
+        proto->SubClass >= ITEM_SUBCLASS_ARMOR_CLOTH && proto->SubClass <= ITEM_SUBCLASS_ARMOR_PLATE &&
+        NotBestArmorType(proto->SubClass))
+    {
+        weight_ *= 0.25f;
+    }
+
     if (enable_item_set_bonus_)
         CalculateItemSetMod(player_, proto);
 
@@ -129,7 +136,7 @@ float StatsWeightCalculator::CalculateItem(uint32 itemId, int32 randomPropertyId
     }
 
     // Apply weapon speed governance if slot is provided and this is a weapon
-    if (sPlayerbotAIConfig.preferredSpecWeapons && slot >= 0 && proto->Class == ITEM_CLASS_WEAPON)
+    if (sPlayerbotAIConfig.ShouldPreferSpecWeapons(player_) && slot >= 0 && proto->Class == ITEM_CLASS_WEAPON)
         weight_ *= ApplyPreferredSpecWeapons(proto, slot);
 
     return weight_;

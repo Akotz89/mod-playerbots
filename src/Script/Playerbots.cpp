@@ -264,12 +264,25 @@ public:
 
     void OnPlayerGiveXP(Player* player, uint32& amount, Unit* /*victim*/, uint8 /*xpSource*/) override
     {
-        // early return
-        if (sPlayerbotAIConfig.randomBotXPRate == 1.0 || !player)
+        if (!player)
             return;
 
-        // no XP multiplier, when player is no bot.
-        if (!player->GetSession()->IsBot() || !sRandomPlayerbotMgr.IsRandomBot(player))
+        // No bot-specific XP behavior for an ordinary player or an unrelated bot type.
+        if (!player->GetSession()->IsBot() ||
+            (!sRandomPlayerbotMgr.IsRandomBot(player) && !sRandomPlayerbotMgr.IsAddclassBot(player)))
+            return;
+
+        // Keep the live bot population at or below the highest ordinary-player
+        // level observed by the realm. Login filtering alone is insufficient because
+        // an already-online bot can otherwise level beyond the synchronized ceiling.
+        if (sPlayerbotAIConfig.syncLevelWithPlayers &&
+            player->GetLevel() >= sRandomPlayerbotMgr.GetSynchronizedPlayerLevel())
+        {
+            amount = 0;
+            return;
+        }
+
+        if (sPlayerbotAIConfig.randomBotXPRate == 1.0)
             return;
 
         // no XP multiplier, when bot is in a group with a real player.
@@ -516,9 +529,11 @@ void AddSC_HyjalSummitBotScripts();
 void AddSC_IcecrownBotScripts();
 void AddSC_RubySanctumBotScripts();
 void AddSC_randombot_level_mgr();
+void RegisterPythonPopulationBridge();
 
 void AddPlayerbotsScripts()
 {
+    RegisterPythonPopulationBridge();
     new PlayerbotsBattlefieldScript();
     new PlayerbotsDatabaseScript();
     new PlayerbotsPlayerScript();

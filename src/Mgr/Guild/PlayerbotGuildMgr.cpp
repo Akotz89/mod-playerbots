@@ -15,7 +15,12 @@
 void PlayerbotGuildMgr::Init()
 {
     _guildCache.clear();
-    if (sPlayerbotAIConfig.deleteRandomBotGuilds)
+    if (sPlayerbotAIConfig.deleteRandomBotGuilds && sPlayerbotAIConfig.randomBotPersistentProgression)
+    {
+        LOG_ERROR("playerbots",
+                  "AiPlayerbot.DeleteRandomBotGuilds is ignored because persistent randombot progression is enabled");
+    }
+    else if (sPlayerbotAIConfig.deleteRandomBotGuilds)
         DeleteBotGuilds();
 
     LoadGuildNames();

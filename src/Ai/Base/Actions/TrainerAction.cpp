@@ -9,9 +9,11 @@
 #include "BisListMgr.h"
 #include "BudgetValues.h"
 #include "Event.h"
+#include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
 #include "PlayerbotTextMgr.h"
 #include "Playerbots.h"
+#include "RandomPlayerbotMgr.h"
 #include "ReputationMgr.h"
 #include "Trainer.h"
 
@@ -174,6 +176,12 @@ void TrainerAction::TellFooter(uint32 totalCost)
 
 bool MaintenanceAction::Execute(Event /*event*/)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        botAI->TellError("maintenance is disabled for persistent randombots");
+        return false;
+    }
+
     if (!sPlayerbotAIConfig.maintenanceCommand)
     {
         botAI->TellError("maintenance command is not allowed, please check the configuration.");
@@ -298,6 +306,12 @@ bool BisGearAction::RunAutogearFallback(uint16 effectiveIlvl)
 
 bool BisGearAction::Execute(Event event)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        botAI->TellError("synthetic gear is disabled for persistent randombots");
+        return false;
+    }
+
     if (!sPlayerbotAIConfig.autoGearBisCommand)
     {
         botAI->TellError(PlayerbotTextMgr::instance().GetBotTextOrDefault(
@@ -555,6 +569,12 @@ static uint32 GetWornItemLevelAverage(Player* player)
 
 bool AutoGearAction::Execute(Event event)
 {
+    if (sPlayerbotAIConfig.randomBotPersistentProgression && sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        botAI->TellError("synthetic gear is disabled for persistent randombots");
+        return false;
+    }
+
     if (!sPlayerbotAIConfig.autoGearCommand)
     {
         botAI->TellError(PlayerbotTextMgr::instance().GetBotTextOrDefault(

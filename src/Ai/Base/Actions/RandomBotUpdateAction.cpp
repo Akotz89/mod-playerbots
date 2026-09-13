@@ -7,11 +7,20 @@
 #include "RandomBotUpdateAction.h"
 #include "Event.h"
 #include "Playerbots.h"
+#include "ScriptMgr.h"
 
 bool RandomBotUpdateAction::Execute(Event /*event*/)
 {
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
+
+    // Community activity modules can atomically own an RNDBOT for a real
+    // gameplay activity. Do not let periodic factory maintenance independently
+    // disband that owned group, randomize the character, or teleport it away.
+    // The default hook result is true, so ordinary Playerbots behavior is
+    // unchanged when no activity owner is installed.
+    if (!sScriptMgr->OnPlayerbotCanRunRandomBotMaintenance(bot))
+        return true;
 
     if (bot->GetGroup() && botAI->GetGroupLeader())
     {

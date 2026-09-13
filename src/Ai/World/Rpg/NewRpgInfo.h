@@ -74,6 +74,11 @@ struct NewRpgInfo
     {
     };
 
+    bool pythonQuestGoal{false};
+    uint32 pythonGoalAccountId{0}; // Stamped only after the provider verifies the durable account binding.
+    uint32 pythonGoalRefreshedAt{0};
+    uint64 pythonGoalGeneration{0};
+
     uint32 startT{0};  // start timestamp of the current status
 
     // MOVE_FAR

@@ -23,6 +23,20 @@ class WorldSession;
 class RandomPlayerbotFactory
 {
 public:
+    struct ManifestCharacterSpec
+    {
+        std::string name;
+        uint8 race{0};
+        uint8 cls{0};
+        uint8 level{0};
+        uint8 gender{0};
+        uint8 skin{0};
+        uint8 face{0};
+        uint8 hairStyle{0};
+        uint8 hairColor{0};
+        uint8 facialHair{0};
+    };
+
     enum class NameRaceAndGender : uint8
     {
         // Generic is the category used for human & undead
@@ -56,6 +70,7 @@ public:
     static std::string const CreateRandomGuildName();
     static uint32 CalculateTotalAccountCount();
     static uint32 CalculateAvailableCharsPerAccount();
+    static uint32 EnsureManifestBot(uint32 accountId, ManifestCharacterSpec const& spec);
 
     // Arena team management
     static void AssignBotToArenaTeam(Player* bot);

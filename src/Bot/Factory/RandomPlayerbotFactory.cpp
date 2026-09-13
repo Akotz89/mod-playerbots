@@ -21,6 +21,12 @@
 #include "SharedDefines.h"
 #include "SocialMgr.h"
 #include "Timer.h"
+#include <algorithm>
+#include <cctype>
+#include <fstream>
+#include <iomanip>
+#include <openssl/sha.h>
+#include <set>
 
 constexpr RandomPlayerbotFactory::NameRaceAndGender RandomPlayerbotFactory::CombineRaceAndGender(uint8 race,
                                                                                                 uint8 gender)
@@ -58,6 +64,49 @@ bool RandomPlayerbotFactory::IsValidRaceClassCombination(uint8 race, uint8 cls, 
 
     PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, cls);
     return info != nullptr;
+}
+
+uint32 RandomPlayerbotFactory::EnsureManifestBot(uint32 accountId, ManifestCharacterSpec const& spec)
+{
+    if (!accountId || spec.level != 1 || spec.name.size() < 2 || spec.name.size() > 12 ||
+        !std::all_of(spec.name.begin(), spec.name.end(), [](unsigned char value) { return std::isalpha(value); }) ||
+        !IsValidRaceClassCombination(spec.race, spec.cls, EXPANSION_WRATH_OF_THE_LICH_KING) ||
+        spec.cls == CLASS_DEATH_KNIGHT)
+        return 0;
+
+    if (QueryResult existing = CharacterDatabase.Query(
+            "SELECT guid, account, race, class, level, gender, skin, face, hairStyle, hairColor, facialStyle "
+            "FROM characters WHERE name = '{}'", spec.name))
+    {
+        Field* fields = existing->Fetch();
+        bool exact = fields[1].Get<uint32>() == accountId && fields[2].Get<uint8>() == spec.race &&
+                     fields[3].Get<uint8>() == spec.cls && fields[4].Get<uint8>() == 1 &&
+                     fields[5].Get<uint8>() == spec.gender && fields[6].Get<uint8>() == spec.skin &&
+                     fields[7].Get<uint8>() == spec.face && fields[8].Get<uint8>() == spec.hairStyle &&
+                     fields[9].Get<uint8>() == spec.hairColor && fields[10].Get<uint8>() == spec.facialHair;
+        return exact ? fields[0].Get<uint32>() : 0;
+    }
+
+    WorldSession session(accountId, "", 0x0, nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING,
+                         time_t(0), LOCALE_enUS, 0, false, false, 0, true);
+    CharacterCreateInfo characterInfo(spec.name, spec.race, spec.cls, spec.gender, spec.skin,
+                                      spec.face, spec.hairStyle, spec.hairColor, spec.facialHair);
+    std::unique_ptr<Player> player = std::make_unique<Player>(&session);
+    player->GetMotionMaster()->Initialize();
+    if (!player->Create(sObjectMgr->GetGenerator<HighGuid::Player>().Generate(), &characterInfo))
+    {
+        player->CleanupsBeforeDelete();
+        return 0;
+    }
+    player->setCinematic(2);
+    player->SetAtLoginFlag(AT_LOGIN_NONE);
+    player->SaveToDB(true, false);
+    uint32 guid = player->GetGUID().GetCounter();
+    sCharacterCache->AddCharacterCacheEntry(player->GetGUID(), accountId, player->GetName(),
+                                             player->getGender(), player->getRace(),
+                                             player->getClass(), player->GetLevel());
+    player->CleanupsBeforeDelete();
+    return guid;
 }
 
 Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& nameCache)
@@ -430,7 +479,8 @@ uint32 RandomPlayerbotFactory::CalculateTotalAccountCount()
 uint32 RandomPlayerbotFactory::CalculateAvailableCharsPerAccount()
 {
     // Death Knight availability according to their login eligibility, and if WotLK is enabled at all.
-    bool noDK = sPlayerbotAIConfig.disableDeathKnightLogin || sWorld->getIntConfig(CONFIG_EXPANSION) != EXPANSION_WRATH_OF_THE_LICH_KING;
+    bool noDK = sPlayerbotAIConfig.IsDeathKnightLoginDisabled() ||
+        sWorld->getIntConfig(CONFIG_EXPANSION) != EXPANSION_WRATH_OF_THE_LICH_KING;
 
     uint32 availableChars = noDK ? 9 : 10;
 
@@ -453,6 +503,138 @@ uint32 RandomPlayerbotFactory::CalculateAvailableCharsPerAccount()
 void RandomPlayerbotFactory::CreateRandomBots()
 {
     /* multi-thread here is meaningless? since the async db operations */
+
+    if (!sPlayerbotAIConfig.randomBotFactorySealedIdentityFile.empty())
+    {
+        std::ifstream sealedIdentityFile(sPlayerbotAIConfig.randomBotFactorySealedIdentityFile, std::ios::binary);
+        if (!sealedIdentityFile)
+        {
+            LOG_ERROR("playerbots", "Sealed RNDBOT identity file cannot be opened: {}",
+                      sPlayerbotAIConfig.randomBotFactorySealedIdentityFile);
+            World::StopNow(SHUTDOWN_EXIT_CODE);
+            return;
+        }
+        std::string const expectedIdentities((std::istreambuf_iterator<char>(sealedIdentityFile)),
+                                             std::istreambuf_iterator<char>());
+        if (expectedIdentities.empty())
+        {
+            LOG_ERROR("playerbots", "Sealed RNDBOT identity file is empty; refusing an empty population");
+            World::StopNow(SHUTDOWN_EXIT_CODE);
+            return;
+        }
+
+        sPlayerbotAIConfig.randomBotAccounts.clear();
+        std::string const loginDatabaseName = LoginDatabase.GetConnectionInfo()->database;
+        QueryResult identities = CharacterDatabase.Query(
+            "SELECT a.id,a.username,COALESCE(c.guid,0),COALESCE(c.name,''),COALESCE(c.race,0),"
+            "COALESCE(c.class,0),COALESCE(c.gender,0) FROM {}.account a LEFT JOIN characters c ON c.account=a.id "
+            "WHERE a.username LIKE '{}%%' ORDER BY a.id,c.guid",
+            loginDatabaseName, sPlayerbotAIConfig.randomBotAccountPrefix);
+
+        std::ostringstream serializedIdentities;
+        uint32 lastAccountId = 0;
+        uint32 characterCount = 0;
+        if (identities)
+        {
+            do
+            {
+                Field* identity = identities->Fetch();
+                uint32 const accountId = identity[0].Get<uint32>();
+                uint32 const characterGuid = static_cast<uint32>(identity[2].Get<uint64>());
+                if (accountId != lastAccountId)
+                {
+                    sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
+                    lastAccountId = accountId;
+                }
+                if (characterGuid)
+                    ++characterCount;
+
+                serializedIdentities << accountId << '\t' << identity[1].Get<std::string>() << '\t'
+                                     << characterGuid << '\t' << identity[3].Get<std::string>() << '\t'
+                                     << identity[4].Get<uint64>() << '\t'
+                                     << identity[5].Get<uint64>() << '\t'
+                                     << identity[6].Get<uint64>() << '\n';
+            } while (identities->NextRow());
+        }
+
+        auto digest = [](std::string const& data)
+        {
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            SHA256(reinterpret_cast<unsigned char const*>(data.data()), data.size(), hash);
+            std::ostringstream output;
+            output << std::hex << std::setfill('0');
+            for (unsigned char byte : hash)
+                output << std::setw(2) << static_cast<uint32>(byte);
+            return output.str();
+        };
+
+        std::string const identityData = serializedIdentities.str();
+        if (sPlayerbotAIConfig.randomBotAccounts.empty() || characterCount == 0 || identityData.empty())
+        {
+            LOG_ERROR("playerbots", "Sealed RNDBOT database population is empty; refusing startup");
+            World::StopNow(SHUTDOWN_EXIT_CODE);
+            return;
+        }
+        if (identityData != expectedIdentities)
+        {
+            LOG_ERROR("playerbots",
+                      "Sealed RNDBOT identity mismatch: expected SHA-256 {}, actual {}; refusing factory repair",
+                      digest(expectedIdentities), digest(identityData));
+            World::StopNow(SHUTDOWN_EXIT_CODE);
+            return;
+        }
+
+        if (sPlayerbotAIConfig.deleteRandomBotAccounts)
+            LOG_WARN("playerbots", "DeleteRandomBotAccounts is ignored while the RNDBOT identity seal is active");
+
+        LOG_INFO("server.loading",
+                 ">> Sealed RNDBOT population verified and loaded read-only: {} accounts with {} characters; "
+                 "identity SHA-256 {}",
+                 sPlayerbotAIConfig.randomBotAccounts.size(), characterCount, digest(identityData));
+        return;
+    }
+
+    if (sPlayerbotAIConfig.randomBotPersistentProgression)
+    {
+        if (sPlayerbotAIConfig.deleteRandomBotAccounts)
+        {
+            LOG_ERROR("playerbots",
+                      "AiPlayerbot.DeleteRandomBotAccounts is ignored because "
+                      "AiPlayerbot.RandomBotPersistentProgression is enabled");
+        }
+
+        sPlayerbotAIConfig.randomBotAccounts.clear();
+        uint32 totalRandomBotChars = 0;
+        QueryResult existingAccounts = LoginDatabase.Query(
+            "SELECT id FROM account WHERE username LIKE '{}%%' ORDER BY id",
+            sPlayerbotAIConfig.randomBotAccountPrefix.c_str());
+
+        if (existingAccounts)
+        {
+            do
+            {
+                uint32 accountId = existingAccounts->Fetch()[0].Get<uint32>();
+                sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
+                totalRandomBotChars += AccountMgr::GetCharactersCount(accountId);
+            } while (existingAccounts->NextRow());
+        }
+
+        if (sPlayerbotAIConfig.randomBotAccounts.empty() || totalRandomBotChars == 0)
+        {
+            LOG_ERROR("playerbots",
+                      "Persistent randombot progression is enabled, but no existing '{}' population was found; "
+                      "factory creation remains disabled",
+                      sPlayerbotAIConfig.randomBotAccountPrefix);
+            World::StopNow(SHUTDOWN_EXIT_CODE);
+            return;
+        }
+
+        LOG_INFO("server.loading",
+                 ">> Persistent randombot population loaded read-only: {} accounts with {} characters; "
+                 "factory account/character creation and deletion disabled",
+                 sPlayerbotAIConfig.randomBotAccounts.size(), totalRandomBotChars);
+        return;
+    }
 
     if (sPlayerbotAIConfig.deleteRandomBotAccounts)
     {
@@ -666,8 +848,13 @@ void RandomPlayerbotFactory::CreateRandomBots()
 
         sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
 
+        // Compatibility port of voxan-dev/mod-playerbots commit f6ad85eede2bc6f5f2a61aff168f3926bc2199f3.
+        // The community fix makes ordinary factory startup idempotent for DK-disabled accounts.
+        bool const noDeathKnight = sPlayerbotAIConfig.IsDeathKnightLoginDisabled() ||
+            sWorld->getIntConfig(CONFIG_EXPANSION) != EXPANSION_WRATH_OF_THE_LICH_KING;
+        uint32 const maxCharactersPerAccount = noDeathKnight ? 9 : 10;
         uint32 count = AccountMgr::GetCharactersCount(accountId);
-        if (count >= 10)
+        if (count >= maxCharactersPerAccount)
         {
             continue;
         }
@@ -708,8 +895,25 @@ void RandomPlayerbotFactory::CreateRandomBots()
                                                 time_t(0), LOCALE_enUS, 0, false, false, 0, true);
         sessionBots.push_back(session);
 
-        for (uint8 cls = CLASS_WARRIOR; cls < MAX_CLASSES - count; ++cls)
+        std::set<uint8> existingClasses;
+        QueryResult existingClassResult = CharacterDatabase.Query(
+            "SELECT class FROM characters WHERE account = {}", accountId);
+        if (existingClassResult)
         {
+            do
+            {
+                existingClasses.insert(existingClassResult->Fetch()[0].Get<uint8>());
+            } while (existingClassResult->NextRow());
+        }
+
+        for (uint8 cls = CLASS_WARRIOR; cls < MAX_CLASSES; ++cls)
+        {
+            if (cls == CLASS_DEATH_KNIGHT && noDeathKnight)
+                continue;
+
+            if (existingClasses.contains(cls))
+                continue;
+
             // skip nonexistent classes
             if (!((1 << (cls - 1)) & CLASSMASK_ALL_PLAYABLE) || !sChrClassesStore.LookupEntry(cls))
                 continue;
@@ -731,6 +935,7 @@ void RandomPlayerbotFactory::CreateRandomBots()
                                                     playerBot->getClass(), playerBot->GetLevel());
             playerBot->CleanupsBeforeDelete();
             delete playerBot;
+            existingClasses.insert(cls);
             bot_creation++;
         }
     }
