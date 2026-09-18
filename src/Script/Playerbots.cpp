@@ -21,6 +21,8 @@
 #include "ScriptMgr.h"
 #include "cmath"
 
+void InitializeManagedPopulationProgression();
+
 class PlayerbotsDatabaseScript : public DatabaseScript
 {
 public:
@@ -367,6 +369,7 @@ public:
         LOG_INFO("server.loading", "Load Playerbots Config...");
 
         sPlayerbotAIConfig.Initialize();
+        InitializeManagedPopulationProgression();
 
         LOG_INFO("server.loading", ">> Loaded playerbots config in {} ms", GetMSTimeDiffToNow(oldMSTime));
         LOG_INFO("server.loading", " ");

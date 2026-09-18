@@ -180,6 +180,7 @@ public:
     // Policy and identity selection remain outside Playerbots; these methods
     // only keep the existing event ledger and currentBots scheduler coherent.
     bool PopulationRequestSession(uint32 characterGuid);
+    bool PopulationSessionExists(uint32 characterGuid) const;
     bool PopulationReleaseSession(uint32 characterGuid);
 
 protected:

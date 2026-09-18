@@ -22,6 +22,7 @@
 #include "MapMgr.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
+#include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "PerfMonitor.h"
 #include "Player.h"
@@ -2450,25 +2451,58 @@ void RandomPlayerbotMgr::SetValue(Player* bot, std::string const& type, uint32 v
 
 bool RandomPlayerbotMgr::PopulationRequestSession(uint32 characterGuid)
 {
-    if (!characterGuid)
+    if (!characterGuid || !sPlayerbotAIConfig.enabled)
         return false;
-    if (currentBots.contains(characterGuid))
-        return true;
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    if (Player* connected = ObjectAccessor::FindConnectedPlayer(guid))
+    {
+        // A human-owned session cannot be adopted by the population controller.
+        if (GetPlayerBot(characterGuid) != connected)
+            return false;
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(connected);
+        Player* master = ai ? ai->GetMaster() : nullptr;
+        return ai && (!master || GET_PLAYERBOT_AI(master)) && currentBots.contains(characterGuid);
+    }
+    if (auto loading = botLoading.find(guid); loading != botLoading.end())
+        return loading->second == 0 && currentBots.contains(characterGuid);
+    // Reuse the native asynchronous login primitive; acknowledge only after it queues.
+    AddPlayerBot(guid, 0);
+    if (!botLoading.contains(guid))
+        return false;
     SetEventValue(characterGuid, "add", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
     SetEventValue(characterGuid, "logout", 0, 0);
     currentBots.insert(characterGuid);
     return true;
 }
 
+bool RandomPlayerbotMgr::PopulationSessionExists(uint32 characterGuid) const
+{
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    return botLoading.contains(guid) || ObjectAccessor::FindConnectedPlayer(guid) != nullptr;
+}
+
 bool RandomPlayerbotMgr::PopulationReleaseSession(uint32 characterGuid)
 {
     if (!characterGuid)
         return false;
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(characterGuid);
+    // A pending asynchronous login cannot yet acknowledge teardown.
+    if (botLoading.contains(guid))
+        return false;
+    if (Player* bot = GetPlayerBot(characterGuid))
+    {
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        Player* master = ai ? ai->GetMaster() : nullptr;
+        if (!ai || (master && !GET_PLAYERBOT_AI(master)) || bot->GetGroup() ||
+            bot->IsInCombat() || bot->GetMap()->IsDungeon())
+            return false;
+        LogoutPlayerBot(guid);
+        if (GetPlayerBot(characterGuid))
+            return false;
+    }
     SetEventValue(characterGuid, "add", 0, 0);
     SetEventValue(characterGuid, "logout", 0, 0);
     currentBots.erase(characterGuid);
-    if (GetPlayerBot(characterGuid))
-        LogoutPlayerBot(ObjectGuid::Create<HighGuid::Player>(characterGuid));
     return true;
 }
 

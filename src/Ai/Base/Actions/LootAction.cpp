@@ -47,6 +47,11 @@ bool LootAction::Execute(Event /*event*/)
 
 bool LootAction::isUseful()
 {
+    if (!sPlayerbotAIConfig.freeMethodLoot && bot->GetGroup() &&
+        bot->GetGroup()->GetLootMethod() == FREE_FOR_ALL && !IsSelfBot(bot))
+        return AI_VALUE(LootObjectStack*, "available loot")->GetLoot(
+            sPlayerbotAIConfig.lootDistance).skillId != SKILL_NONE;
+
     return sPlayerbotAIConfig.freeMethodLoot || !bot->GetGroup() ||
     bot->GetGroup()->GetLootMethod() != FREE_FOR_ALL || IsSelfBot(bot);
 }
