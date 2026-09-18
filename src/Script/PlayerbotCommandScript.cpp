@@ -7,6 +7,7 @@
 #include "BattleGroundTactics.h"
 #include "Chat.h"
 #include "GuildTaskMgr.h"
+#include "Guide/PythonPopulationBridge.h"
 #include "PerfMonitor.h"
 #include "PlayerbotMgr.h"
 #include "RandomPlayerbotMgr.h"
@@ -32,6 +33,11 @@ public:
             {"unlink", HandleUnlinkAccountCommand, SEC_PLAYER, Console::No},
         };
 
+        static ChatCommandTable playerbotsPopulationCommandTable = {
+            {"bind", HandlePopulationBindCommand, SEC_PLAYER, Console::No},
+            {"status", HandlePopulationStatusCommand, SEC_PLAYER, Console::No},
+        };
+
         static ChatCommandTable playerbotsCommandTable = {
             {"bot", HandlePlayerbotCommand, SEC_PLAYER, Console::No},
             {"gtask", HandleGuildTaskCommand, SEC_GAMEMASTER, Console::Yes},
@@ -39,6 +45,7 @@ public:
             {"rndbot", HandleRandomPlayerbotCommand, SEC_GAMEMASTER, Console::Yes},
             {"debug", playerbotsDebugCommandTable},
             {"account", playerbotsAccountCommandTable},
+            {"population", playerbotsPopulationCommandTable},
         };
 
         static ChatCommandTable commandTable = {
@@ -56,6 +63,58 @@ public:
     static bool HandleRandomPlayerbotCommand(ChatHandler* handler, char const* args)
     {
         return RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(handler, args);
+    }
+
+    static bool HandlePopulationBindCommand(ChatHandler* handler, char const* args)
+    {
+        if (args && *args)
+        {
+            handler->PSendSysMessage("Usage: .playerbots population bind");
+            return false;
+        }
+
+        PlayerbotsPopulation::OwnerBindingState result =
+            PlayerbotsPopulation::BindOwner(handler->GetSession()->GetPlayer());
+        if (!result.committed)
+        {
+            handler->PSendSysMessage("Population owner bind refused: {}", result.reason);
+            return false;
+        }
+
+        handler->PSendSysMessage(
+            "Population owner {}: account {}, character {}, generation {}, high-water {}.",
+            result.alreadyBound ? "already bound" : "bound", result.accountId, result.characterGuid,
+            result.generation, result.highWater);
+        return true;
+    }
+
+    static bool HandlePopulationStatusCommand(ChatHandler* handler, char const* args)
+    {
+        if (args && *args)
+        {
+            handler->PSendSysMessage("Usage: .playerbots population status");
+            return false;
+        }
+
+        PlayerbotsPopulation::OwnerBindingState result =
+            PlayerbotsPopulation::ReadOwnerBindingState();
+        if (!result.available)
+        {
+            handler->PSendSysMessage("Population owner status unavailable: {}", result.reason);
+            return false;
+        }
+        if (!result.bound)
+        {
+            handler->PSendSysMessage(
+                "Population owner is unbound; generation {}, high-water {}.", result.generation,
+                result.highWater);
+            return true;
+        }
+
+        handler->PSendSysMessage(
+            "Population owner is bound: account {}, character {}, generation {}, high-water {}.",
+            result.accountId, result.characterGuid, result.generation, result.highWater);
+        return true;
     }
 
     static bool HandleGuildTaskCommand(ChatHandler* handler, char const* args)

@@ -1,8 +1,10 @@
 #include "PopulationBridge.h"
 #include "AccountMgr.h"
 #include "Config.h"
+#include "Cryptography/CryptoHash.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
+#include "Guide/PythonPopulationBridge.h"
 #include "Log.h"
 #include "NewRpgInfo.h"
 #include "ObjectAccessor.h"
@@ -17,6 +19,7 @@
 #include "Random.h"
 #include "ScriptMgr.h"
 #include "Timer.h"
+#include "Utilities/Util.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -67,6 +70,163 @@ std::unordered_map<uint32, ManagedProgressionPolicy> ManagedPolicies;
 std::unordered_map<std::string, uint32> AdmittedProgressionIdentities;
 constexpr uint32 ProgressionPolicyLeaseMilliseconds = 5000;
 std::atomic<uint64> StrategicGeneration{1};
+std::atomic<int8> OwnerLedgerAvailability{-1};
+
+std::string PopulationRealmId()
+{
+    return std::to_string(sConfigMgr->GetOption<uint32>("RealmID", 1));
+}
+
+std::string Sha256Hex(std::string const& value)
+{
+    auto const digest = Acore::Crypto::SHA256::GetDigestOf(value);
+    return Acore::Impl::ByteArrayToHexStr(digest.data(), digest.size());
+}
+
+bool HasV2OwnerLedger()
+{
+    int8 cached = OwnerLedgerAvailability.load(std::memory_order_acquire);
+    if (cached >= 0)
+        return cached == 1;
+
+    QueryResult tables = PlayerbotsDatabase.Query(
+        "SELECT COUNT(DISTINCT table_name) FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name IN "
+        "('population_director_schedule', 'population_director_owner_state', "
+        "'population_director_owner_binding_audit', 'population_director_identity')");
+    QueryResult ownerColumns = PlayerbotsDatabase.Query(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = 'population_director_owner_state' "
+        "AND column_name IN ('realm_id', 'binding_state', 'owner_account_id', "
+        "'owner_character_guid', 'highest_owner_level_seen', 'current_epoch', "
+        "'generation', 'last_reconciled_at')");
+    bool available = tables && ownerColumns && tables->Fetch()[0].Get<uint64>() == 4 &&
+        ownerColumns->Fetch()[0].Get<uint64>() == 8;
+    OwnerLedgerAvailability.store(available ? 1 : 0, std::memory_order_release);
+    return available;
+}
+
+struct ResolvedOwner
+{
+    uint8 level{0};
+    std::string name;
+    std::string reason;
+};
+
+ResolvedOwner ResolveOwner(uint32 accountId, uint32 characterGuid)
+{
+    ResolvedOwner result;
+    if (!accountId || !characterGuid)
+    {
+        result.reason = "owner_identity_missing";
+        return result;
+    }
+
+    QueryResult account = LoginDatabase.Query("SELECT id FROM account WHERE id = {}", accountId);
+    if (!account)
+    {
+        result.reason = "owner_account_not_found";
+        return result;
+    }
+
+    QueryResult character = CharacterDatabase.Query(
+        "SELECT account, level, name FROM characters WHERE guid = {}", characterGuid);
+    if (!character)
+    {
+        result.reason = "owner_character_not_found";
+        return result;
+    }
+    Field* fields = character->Fetch();
+    if (fields[0].Get<uint32>() != accountId)
+    {
+        result.reason = "owner_character_account_mismatch";
+        return result;
+    }
+
+    QueryResult autonomousAccount = PlayerbotsDatabase.Query(
+        "SELECT account_type FROM playerbots_account_type "
+        "WHERE account_id = {} AND account_type IN (1, 2) LIMIT 1", accountId);
+    if (autonomousAccount)
+    {
+        result.reason = "owner_account_is_autonomous";
+        return result;
+    }
+
+    QueryResult legacyAccount = PlayerbotsDatabase.Query(
+        "SELECT COUNT(*) FROM playerbots_population_account WHERE account_id = {}", accountId);
+    if (!legacyAccount)
+    {
+        result.reason = "population_account_ledger_unavailable";
+        return result;
+    }
+    if (legacyAccount->Fetch()[0].Get<uint64>() != 0)
+    {
+        result.reason = "owner_overlaps_population_account";
+        return result;
+    }
+
+    QueryResult legacyIdentity = PlayerbotsDatabase.Query(
+        "SELECT COUNT(*) FROM playerbots_population_identity WHERE character_guid = {}", characterGuid);
+    if (!legacyIdentity)
+    {
+        result.reason = "population_identity_ledger_unavailable";
+        return result;
+    }
+    if (legacyIdentity->Fetch()[0].Get<uint64>() != 0)
+    {
+        result.reason = "owner_overlaps_population_identity";
+        return result;
+    }
+
+    QueryResult managedIdentity = PlayerbotsDatabase.Query(
+        "SELECT COUNT(*) FROM population_director_identity WHERE realm_id = '{}' "
+        "AND (account_id = {} OR character_guid = {})",
+        PopulationRealmId(), accountId, characterGuid);
+    if (!managedIdentity)
+    {
+        result.reason = "population_identity_ledger_unavailable";
+        return result;
+    }
+    if (managedIdentity->Fetch()[0].Get<uint64>() != 0)
+    {
+        result.reason = "owner_overlaps_population_identity";
+        return result;
+    }
+
+    Player* connected = ObjectAccessor::FindConnectedPlayer(
+        ObjectGuid::Create<HighGuid::Player>(characterGuid));
+    if (connected && (!connected->GetSession() || connected->GetSession()->IsBot() ||
+        (GET_PLAYERBOT_AI(connected) && !IsSelfBot(connected)) ||
+        connected->GetSession()->GetAccountId() != accountId ||
+        sRandomPlayerbotMgr.IsRandomBot(connected)))
+    {
+        result.reason = "owner_session_is_not_human";
+        return result;
+    }
+
+    result.level = fields[1].Get<uint8>();
+    result.name = fields[2].Get<std::string>();
+    if (connected)
+        result.level = std::max(result.level, connected->GetLevel());
+    if (!result.level || result.level > 80)
+        result.reason = "owner_level_out_of_range";
+    return result;
+}
+
+void AdvanceOwnerHighWater(PlayerbotsPopulation::OwnerBindingState const& state, uint8 level)
+{
+    if (!state.bound || level <= state.highWater || level > 80)
+        return;
+
+    PlayerbotsDatabaseTransaction transaction = PlayerbotsDatabase.BeginTransaction();
+    transaction->Append(
+        "UPDATE population_director_owner_state SET highest_owner_level_seen = {}, "
+        "current_epoch = {}, generation = generation + 1, last_reconciled_at = UTC_TIMESTAMP(6) "
+        "WHERE realm_id = '{}' AND binding_state = 'bound' AND owner_account_id = {} "
+        "AND owner_character_guid = {} AND generation = {} AND highest_owner_level_seen < {}",
+        level, level, PopulationRealmId(), state.accountId, state.characterGuid, state.generation, level);
+    PlayerbotsDatabase.DirectCommitTransaction(transaction);
+}
 
 void LoadManagedProgressionInventory()
 {
@@ -340,37 +500,26 @@ public:
     {
         OwnerHighWater result;
         result.observedEpoch = static_cast<uint64>(GameTime::GetGameTime().count());
-        uint32 accountId = sConfigMgr->GetOption<uint32>("Python.Population.OwnerAccountId", 0);
-        if (!accountId)
+        PlayerbotsPopulation::OwnerBindingState state = PlayerbotsPopulation::ReadOwnerBindingState();
+        if (!state.available || !state.bound)
             return result;
-        QueryResult account = LoginDatabase.Query("SELECT id FROM account WHERE id = {}", accountId);
-        QueryResult managed = PlayerbotsDatabase.Query(
-            "SELECT COUNT(*) FROM playerbots_population_account WHERE account_id = {}", accountId);
-        if (!account || !managed || managed->Fetch()[0].Get<uint64>() != 0)
+
+        ResolvedOwner owner = ResolveOwner(state.accountId, state.characterGuid);
+        if (!owner.reason.empty())
             return result;
-        uint32 characterGuid = sConfigMgr->GetOption<uint32>("Python.Population.OwnerCharacterGuid", 0);
-        if (!characterGuid)
+
+        if (owner.level > state.highWater)
+        {
+            AdvanceOwnerHighWater(state, owner.level);
+            state = PlayerbotsPopulation::ReadOwnerBindingState();
+            if (!state.available || !state.bound)
+                return result;
+        }
+
+        uint8 level = std::max(state.highWater, owner.level);
+        if (!level || level > 80 || state.currentEpoch != state.highWater)
             return result;
-        QueryResult character = CharacterDatabase.Query(
-            "SELECT level FROM characters WHERE guid = {} AND account = {}", characterGuid, accountId);
-        if (!character)
-            return result;
-        QueryResult managedCharacter = PlayerbotsDatabase.Query(
-            "SELECT COUNT(*) FROM playerbots_population_identity WHERE character_guid = {}", characterGuid);
-        if (!managedCharacter || managedCharacter->Fetch()[0].Get<uint64>() != 0)
-            return result;
-        uint8 level = character->Fetch()[0].Get<uint8>();
-        Player* owner = ObjectAccessor::FindConnectedPlayer(
-            ObjectGuid::Create<HighGuid::Player>(characterGuid));
-        if (owner && (!owner->GetSession() || owner->GetSession()->IsBot() ||
-            (GET_PLAYERBOT_AI(owner) && !IsSelfBot(owner)) ||
-            owner->GetSession()->GetAccountId() != accountId))
-            return result;
-        if (owner)
-            level = owner->GetLevel();
-        if (!level || level > 80)
-            return result;
-        result.characterGuid = characterGuid;
+        result.characterGuid = state.characterGuid;
         result.level = level;
         result.authenticated = true;
         return result;
@@ -775,6 +924,181 @@ public:
     void OnUpdate(uint32 diff) override { PopulationBridge.DrainRevokedSessions(diff); }
 };
 } // namespace
+
+PlayerbotsPopulation::OwnerBindingState PlayerbotsPopulation::ReadOwnerBindingState()
+{
+    OwnerBindingState result;
+    if (!HasV2OwnerLedger())
+    {
+        result.reason = "v2_owner_ledger_unavailable";
+        return result;
+    }
+
+    std::string realmId = PopulationRealmId();
+    QueryResult row = PlayerbotsDatabase.Query(
+        "SELECT o.binding_state, o.owner_account_id, o.owner_character_guid, "
+        "o.highest_owner_level_seen, o.current_epoch, o.generation, "
+        "s.maximum_owner_level, s.global_phase_cap "
+        "FROM population_director_owner_state o "
+        "JOIN population_director_schedule s ON s.realm_id = o.realm_id "
+        "WHERE o.realm_id = '{}'",
+        realmId);
+    if (!row)
+    {
+        result.reason = "owner_state_not_installed_for_realm";
+        return result;
+    }
+
+    result.available = true;
+    Field* fields = row->Fetch();
+    std::string bindingState = fields[0].Get<std::string>();
+    bool hasAccount = !fields[1].IsNull();
+    bool hasCharacter = !fields[2].IsNull();
+    result.highWater = fields[3].Get<uint8>();
+    result.currentEpoch = fields[4].Get<uint8>();
+    result.generation = fields[5].Get<uint64>();
+    uint8 maximumOwnerLevel = fields[6].Get<uint8>();
+    uint8 globalPhaseCap = fields[7].Get<uint8>();
+
+    if ((hasAccount != hasCharacter) || (bindingState != "unbound" && bindingState != "bound") ||
+        result.generation == 0 || !result.highWater || result.highWater > 80 ||
+        result.currentEpoch != result.highWater ||
+        result.highWater > std::min(maximumOwnerLevel, globalPhaseCap))
+    {
+        result.reason = "owner_state_invalid";
+        return result;
+    }
+
+    if (bindingState == "unbound")
+    {
+        if (hasAccount || hasCharacter)
+        {
+            result.reason = "owner_state_invalid_unbound_pair";
+            return result;
+        }
+        result.reason = "unbound";
+        return result;
+    }
+
+    if (!hasAccount || !hasCharacter)
+    {
+        result.reason = "owner_state_invalid_bound_pair";
+        return result;
+    }
+    result.accountId = fields[1].Get<uint32>();
+    result.characterGuid = fields[2].Get<uint32>();
+    if (!result.accountId || !result.characterGuid)
+    {
+        result.reason = "owner_state_invalid_bound_pair";
+        return result;
+    }
+    result.bound = true;
+    result.reason = "bound";
+    return result;
+}
+
+PlayerbotsPopulation::OwnerBindingState PlayerbotsPopulation::BindOwner(Player* player)
+{
+    OwnerBindingState result = ReadOwnerBindingState();
+    if (!result.available)
+        return result;
+    if (!player || !player->IsInWorld() || !player->GetSession() || player->GetSession()->IsBot())
+    {
+        result.reason = "owner_session_is_not_human";
+        return result;
+    }
+    if (sRandomPlayerbotMgr.IsRandomBot(player))
+    {
+        result.reason = "owner_account_is_autonomous";
+        return result;
+    }
+
+    uint32 accountId = player->GetSession()->GetAccountId();
+    uint32 characterGuid = player->GetGUID().GetCounter();
+    if (result.bound)
+    {
+        if (result.accountId != accountId || result.characterGuid != characterGuid)
+        {
+            result.reason = "owner_already_bound";
+            return result;
+        }
+
+        ResolvedOwner owner = ResolveOwner(accountId, characterGuid);
+        if (!owner.reason.empty())
+        {
+            result.reason = owner.reason;
+            return result;
+        }
+        result.committed = true;
+        result.alreadyBound = true;
+        result.reason = "already_bound";
+        return result;
+    }
+
+    ResolvedOwner owner = ResolveOwner(accountId, characterGuid);
+    if (!owner.reason.empty())
+    {
+        result.reason = owner.reason;
+        return result;
+    }
+
+    std::string realmId = PopulationRealmId();
+    std::string actor = player->GetName();
+    PlayerbotsDatabase.EscapeString(actor);
+    std::string evidenceDigest = Sha256Hex(
+        "owner-resolution-v2|" + realmId + "|" + std::to_string(accountId) + "|" +
+        std::to_string(characterGuid) + "|" + std::to_string(owner.level) + "|" + actor);
+    uint64 nextGeneration = result.generation + 1;
+    std::string eventKey = Sha256Hex(
+        "owner-bind-v2|" + realmId + "|" + std::to_string(result.generation) + "|" +
+        std::to_string(accountId) + "|" + std::to_string(characterGuid));
+    std::string transitionDigest = Sha256Hex(
+        "owner-bind-transition-v2|" + eventKey + "|" + evidenceDigest + "|" +
+        std::to_string(nextGeneration));
+
+    PlayerbotsDatabaseTransaction transaction = PlayerbotsDatabase.BeginTransaction();
+    transaction->Append(
+        "UPDATE population_director_owner_state SET binding_state = 'bound', "
+        "owner_account_id = {}, owner_character_guid = {}, generation = generation + 1, "
+        "last_reconciled_at = UTC_TIMESTAMP(6) WHERE realm_id = '{}' AND binding_state = 'unbound' "
+        "AND owner_account_id IS NULL AND owner_character_guid IS NULL AND generation = {}",
+        accountId, characterGuid, realmId, result.generation);
+    transaction->Append(
+        "INSERT INTO population_director_owner_binding_audit "
+        "(realm_id, event_key, operation, expected_generation, next_generation, "
+        "previous_account_id, previous_character_guid, selected_account_id, selected_character_guid, "
+        "actor, selected_at_utc, resolution_evidence_digest, transition_digest) "
+        "SELECT '{}', '{}', 'bind', {}, {}, NULL, NULL, {}, {}, '{}', UTC_TIMESTAMP(6), '{}', '{}' "
+        "FROM population_director_owner_state WHERE realm_id = '{}' AND binding_state = 'bound' "
+        "AND owner_account_id = {} AND owner_character_guid = {} AND generation = {}",
+        realmId, eventKey, result.generation, nextGeneration, accountId, characterGuid, actor,
+        evidenceDigest, transitionDigest, realmId, accountId, characterGuid, nextGeneration);
+    PlayerbotsDatabase.DirectCommitTransaction(transaction);
+
+    OwnerBindingState readback = ReadOwnerBindingState();
+    if (!readback.available || !readback.bound || readback.accountId != accountId ||
+        readback.characterGuid != characterGuid || readback.generation != nextGeneration)
+    {
+        result.reason = readback.bound ? "owner_binding_cas_conflict" : "owner_binding_not_committed";
+        return result;
+    }
+
+    QueryResult audit = PlayerbotsDatabase.Query(
+        "SELECT selected_account_id, selected_character_guid, operation "
+        "FROM population_director_owner_binding_audit WHERE realm_id = '{}' AND event_key = '{}'",
+        realmId, eventKey);
+    if (!audit || audit->Fetch()[0].Get<uint32>() != accountId ||
+        audit->Fetch()[1].Get<uint32>() != characterGuid ||
+        audit->Fetch()[2].Get<std::string>() != "bind")
+    {
+        result.reason = "owner_binding_audit_readback_failed";
+        return result;
+    }
+
+    readback.committed = true;
+    readback.reason = "bound";
+    return readback;
+}
 
 void InitializeManagedPopulationProgression()
 {
