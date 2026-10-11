@@ -215,16 +215,18 @@ ResolvedOwner ResolveOwner(uint32 accountId, uint32 characterGuid)
 
 void AdvanceOwnerHighWater(PlayerbotsPopulation::OwnerBindingState const& state, uint8 level)
 {
-    if (!state.bound || level <= state.highWater || level > 80)
+    if (!state.bound || level <= state.highWater || level > state.maximumOwnerLevel || level > 80)
         return;
 
+    uint8 effectiveEpoch = PlayerbotsPopulation::CappedOwnerEpoch(
+        level, state.maximumOwnerLevel, state.globalPhaseCap);
     PlayerbotsDatabaseTransaction transaction = PlayerbotsDatabase.BeginTransaction();
     transaction->Append(
         "UPDATE population_director_owner_state SET highest_owner_level_seen = {}, "
         "current_epoch = {}, generation = generation + 1, last_reconciled_at = UTC_TIMESTAMP(6) "
         "WHERE realm_id = '{}' AND binding_state = 'bound' AND owner_account_id = {} "
         "AND owner_character_guid = {} AND generation = {} AND highest_owner_level_seen < {}",
-        level, level, PopulationRealmId(), state.accountId, state.characterGuid, state.generation, level);
+        level, effectiveEpoch, PopulationRealmId(), state.accountId, state.characterGuid, state.generation, level);
     PlayerbotsDatabase.DirectCommitTransaction(transaction);
 }
 
@@ -507,6 +509,8 @@ public:
         ResolvedOwner owner = ResolveOwner(state.accountId, state.characterGuid);
         if (!owner.reason.empty())
             return result;
+        if (owner.level > state.maximumOwnerLevel)
+            return result;
 
         if (owner.level > state.highWater)
         {
@@ -517,7 +521,9 @@ public:
         }
 
         uint8 level = std::max(state.highWater, owner.level);
-        if (!level || level > 80 || state.currentEpoch != state.highWater)
+        if (!level || level > state.maximumOwnerLevel || level > 80 ||
+            state.currentEpoch != PlayerbotsPopulation::CappedOwnerEpoch(
+                state.highWater, state.maximumOwnerLevel, state.globalPhaseCap))
             return result;
         result.characterGuid = state.characterGuid;
         result.level = level;
@@ -959,11 +965,15 @@ PlayerbotsPopulation::OwnerBindingState PlayerbotsPopulation::ReadOwnerBindingSt
     result.generation = fields[5].Get<uint64>();
     uint8 maximumOwnerLevel = fields[6].Get<uint8>();
     uint8 globalPhaseCap = fields[7].Get<uint8>();
+    result.maximumOwnerLevel = maximumOwnerLevel;
+    result.globalPhaseCap = globalPhaseCap;
 
     if ((hasAccount != hasCharacter) || (bindingState != "unbound" && bindingState != "bound") ||
         result.generation == 0 || !result.highWater || result.highWater > 80 ||
-        result.currentEpoch != result.highWater ||
-        result.highWater > std::min(maximumOwnerLevel, globalPhaseCap))
+        !maximumOwnerLevel || maximumOwnerLevel > 80 || !globalPhaseCap || globalPhaseCap > 80 ||
+        result.highWater > maximumOwnerLevel ||
+        result.currentEpoch != PlayerbotsPopulation::CappedOwnerEpoch(
+            result.highWater, maximumOwnerLevel, globalPhaseCap))
     {
         result.reason = "owner_state_invalid";
         return result;
@@ -1000,7 +1010,7 @@ PlayerbotsPopulation::OwnerBindingState PlayerbotsPopulation::ReadOwnerBindingSt
 PlayerbotsPopulation::OwnerBindingState PlayerbotsPopulation::BindOwner(Player* player)
 {
     OwnerBindingState result = ReadOwnerBindingState();
-    if (!result.available)
+    if (!result.available || (result.reason != "bound" && result.reason != "unbound"))
         return result;
     if (!player || !player->IsInWorld() || !player->GetSession() || player->GetSession()->IsBot())
     {

@@ -19,9 +19,17 @@ struct OwnerBindingState
     uint32 characterGuid{0};
     uint8 highWater{0};
     uint8 currentEpoch{0};
+    uint8 maximumOwnerLevel{0};
+    uint8 globalPhaseCap{0};
     uint64 generation{0};
     std::string reason;
 };
+
+constexpr uint8 CappedOwnerEpoch(uint8 highWater, uint8 maximumOwnerLevel, uint8 globalPhaseCap) noexcept
+{
+    uint8 maximum = highWater < maximumOwnerLevel ? highWater : maximumOwnerLevel;
+    return maximum < globalPhaseCap ? maximum : globalPhaseCap;
+}
 
 OwnerBindingState ReadOwnerBindingState();
 OwnerBindingState BindOwner(Player* player);

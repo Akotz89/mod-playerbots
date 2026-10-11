@@ -82,9 +82,9 @@ public:
         }
 
         handler->PSendSysMessage(
-            "Population owner {}: account {}, character {}, generation {}, high-water {}.",
+            "Population owner {}: account {}, character {}, generation {}, earned high-water {}, authorized epoch {}.",
             result.alreadyBound ? "already bound" : "bound", result.accountId, result.characterGuid,
-            result.generation, result.highWater);
+            result.generation, result.highWater, result.currentEpoch);
         return true;
     }
 
@@ -98,22 +98,23 @@ public:
 
         PlayerbotsPopulation::OwnerBindingState result =
             PlayerbotsPopulation::ReadOwnerBindingState();
-        if (!result.available)
+        if (!result.available || (result.reason != "bound" && result.reason != "unbound"))
         {
             handler->PSendSysMessage("Population owner status unavailable: {}", result.reason);
             return false;
         }
         if (!result.bound)
         {
-            handler->PSendSysMessage(
-                "Population owner is unbound; generation {}, high-water {}.", result.generation,
-                result.highWater);
+            handler->PSendSysMessage("Population owner is unbound; generation {}, earned high-water {}, "
+                                     "authorized epoch {}.", result.generation, result.highWater,
+                                     result.currentEpoch);
             return true;
         }
 
         handler->PSendSysMessage(
-            "Population owner is bound: account {}, character {}, generation {}, high-water {}.",
-            result.accountId, result.characterGuid, result.generation, result.highWater);
+            "Population owner is bound: account {}, character {}, generation {}, earned high-water {}, "
+            "authorized epoch {}.", result.accountId, result.characterGuid, result.generation,
+            result.highWater, result.currentEpoch);
         return true;
     }
 
