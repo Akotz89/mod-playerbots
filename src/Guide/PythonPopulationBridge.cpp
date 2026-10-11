@@ -514,9 +514,13 @@ public:
 
         if (owner.level > state.highWater)
         {
+            PlayerbotsPopulation::OwnerBindingState previous = state;
             AdvanceOwnerHighWater(state, owner.level);
             state = PlayerbotsPopulation::ReadOwnerBindingState();
-            if (!state.available || !state.bound)
+            if (!state.available || !state.bound ||
+                state.accountId != previous.accountId || state.characterGuid != previous.characterGuid ||
+                state.maximumOwnerLevel != previous.maximumOwnerLevel || state.globalPhaseCap != previous.globalPhaseCap ||
+                state.generation <= previous.generation || state.highWater < owner.level)
                 return result;
         }
 
