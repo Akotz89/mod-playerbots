@@ -16,7 +16,6 @@
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotMgr.h"
 #include "PlayerbotOperation.h"
-#include "PlayerbotRepository.h"
 #include "Playerbots.h"
 #include "RandomPlayerbotFactory.h"
 #include "RandomPlayerbotMgr.h"
@@ -412,43 +411,6 @@ private:
     uint32 m_requiredSize;
     uint32 m_arenaTeamId;
     std::string m_arenaTeamName;
-};
-
-// Bot logout group cleanup operation
-class BotLogoutGroupCleanupOperation : public PlayerbotOperation
-{
-public:
-    BotLogoutGroupCleanupOperation(ObjectGuid botGuid) : m_botGuid(botGuid) {}
-
-    bool Execute() override
-    {
-        Player* bot = ObjectAccessor::FindPlayer(m_botGuid);
-        if (!bot)
-            return false;
-
-        PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(bot);
-        if (!botAI)
-            return false;
-
-        Group* group = bot->GetGroup();
-        if (group && !bot->InBattleground() && !bot->InBattlegroundQueue() && IsRealPlayer(botAI->GetMaster()))
-            PlayerbotRepository::instance().Save(botAI);
-
-        return true;
-    }
-
-    ObjectGuid GetBotGuid() const override { return m_botGuid; }
-    uint32 GetPriority() const override { return 70; }
-    std::string GetName() const override { return "BotLogoutGroupCleanup"; }
-
-    bool IsValid() const override
-    {
-        Player* bot = ObjectAccessor::FindPlayer(m_botGuid);
-        return bot != nullptr;
-    }
-
-private:
-    ObjectGuid m_botGuid;
 };
 
 // Add player bot operation (for logging in bots from map threads)

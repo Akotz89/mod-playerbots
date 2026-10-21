@@ -20,6 +20,7 @@
 #include "PathGenerator.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
+#include "Playerbots.h"
 #include "PlayerbotTextMgr.h"
 #include "QuestDef.h"
 #include "Random.h"
@@ -422,8 +423,39 @@ bool NewRpgWanderNpcAction::Execute(Event /*event*/)
 
 bool NewRpgDoQuestAction::Execute(Event /*event*/)
 {
+    ObjectGuid actorGuid = bot->GetGUID();
+    uint64 session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    auto current = [&]() { return ObjectAccessor::FindPlayer(actorGuid) == bot && bot->GetSession() &&
+        bot->GetSession()->GetPartySessionIncarnation() == session && GET_PLAYERBOT_AI(bot) == botAI; };
+    if (!current()) return false;
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
+    auto ownsOriginal = [&]()
+    {
+        if (!current()) return false;
+        NewRpgInfo const& live = botAI->rpgInfo;
+        if (live.pythonQuestGoal != originalGoal.pythonQuestGoal || live.pythonGoalRevision != originalGoal.pythonGoalRevision ||
+            live.pythonGoalGeneration != originalGoal.pythonGoalGeneration || live.pythonGoalSession != originalGoal.pythonGoalSession ||
+            live.pythonGoalAccountId != originalGoal.pythonGoalAccountId)
+            return false;
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&live.data);
+        auto const* expected = std::get_if<NewRpgInfo::DoQuest>(&originalGoal.data);
+        return goal && expected && goal->questId == expected->questId && goal->identityKey == expected->identityKey &&
+            goal->rewardKind == expected->rewardKind && goal->rewardIndex == expected->rewardIndex && goal->rewardItem == expected->rewardItem &&
+            goal->questTemplateToken == expected->questTemplateToken && goal->acquiring == expected->acquiring &&
+            goal->giverEntry == expected->giverEntry && goal->giverPosition == expected->giverPosition;
+    };
+    if (botAI->rpgInfo.pythonQuestGoal)
+    {
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+        if (goal && goal->acquiring) return DoAcquireQuest();
+        if (!goal) return false;
+        uint32 questId = goal->questId;
+        uint32 rewardIndex = goal->rewardIndex;
+        if (!botAI->rpgInfo.ValidatePythonQuestTurnIn(bot, sObjectMgr->GetQuestTemplate(questId), rewardIndex) || !current()) return false;
+    }
     if (SearchQuestGiverAndAcceptOrReward())
         return true;
+    if (!ownsOriginal()) return false;
 
     NewRpgInfo& info = botAI->rpgInfo;
     auto* dataPtr = std::get_if<NewRpgInfo::DoQuest>(&info.data);
@@ -441,8 +473,68 @@ bool NewRpgDoQuestAction::Execute(Event /*event*/)
         default:
             break;
     }
+    if (questStatus == QUEST_STATUS_FAILED) info.ObserveQuestAcquisition(bot, "quest_failed");
     info.ChangeToIdle();
     return true;
+}
+
+bool NewRpgDoQuestAction::DoAcquireQuest()
+{
+    NewRpgInfo& info = botAI->rpgInfo;
+    auto const* stored = std::get_if<NewRpgInfo::DoQuest>(&info.data);
+    if (!stored || !info.pythonQuestGoal || !stored->acquiring) return false;
+    NewRpgInfo::DoQuest goal = *stored;
+    uint64 revision = info.pythonGoalRevision;
+    uint64 generation = info.pythonGoalGeneration;
+    uint64 goalSession = info.pythonGoalSession;
+    uint32 account = info.pythonGoalAccountId;
+    ObjectGuid actorGuid = bot->GetGUID();
+    uint64 session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    auto current = [&]()
+    {
+        return ObjectAccessor::FindPlayer(actorGuid) == bot && bot->GetSession() &&
+            bot->GetSession()->GetPartySessionIncarnation() == session && GET_PLAYERBOT_AI(bot) == botAI;
+    };
+    auto ownsOriginal = [&]()
+    {
+        if (!current()) return false;
+        auto const* live = std::get_if<NewRpgInfo::DoQuest>(&info.data);
+        return info.pythonQuestGoal && info.pythonGoalRevision == revision &&
+            info.pythonGoalGeneration == generation && info.pythonGoalSession == goalSession &&
+            info.pythonGoalAccountId == account &&
+            live && live->questId == goal.questId && live->identityKey == goal.identityKey &&
+            live->rewardKind == goal.rewardKind && live->rewardIndex == goal.rewardIndex &&
+            live->rewardItem == goal.rewardItem && live->questTemplateToken == goal.questTemplateToken &&
+            live->acquiring == goal.acquiring && live->giverEntry == goal.giverEntry && live->giverPosition == goal.giverPosition;
+    };
+    uint8 status = bot->GetQuestStatus(goal.questId);
+    if (status == QUEST_STATUS_INCOMPLETE || status == QUEST_STATUS_COMPLETE)
+    {
+        uint32 rewardIndex = goal.rewardIndex;
+        if (!info.ValidatePythonQuestTurnIn(bot, sObjectMgr->GetQuestTemplate(goal.questId), rewardIndex) || !current()) return false;
+        auto* live = std::get_if<NewRpgInfo::DoQuest>(&info.data);
+        if (!live || live->questId != goal.questId || !live->acquiring) return false;
+        live->acquiring = false; // Native quest-log observation, never the acceptance opcode acknowledgment.
+        live->pos = WorldPosition();
+        return true;
+    }
+    if (status != QUEST_STATUS_NONE || !info.ValidatePythonQuestAcquire(bot))
+    {
+        if (ownsOriginal())
+        {
+            info.ObserveQuestAcquisition(bot, status == QUEST_STATUS_FAILED ? "quest_failed" : "attempt_failed",
+                {}, false, 0, 0, 0, status == QUEST_STATUS_FAILED ? "native_quest_status_failed_before_acquire_reset" :
+                    "ordinary_native_acquire_validation_refused");
+            info.Reset();
+        }
+        return false;
+    }
+    if (!ownsOriginal()) return false;
+    if (bot->GetMapId() != goal.giverPosition.GetMapId()) return false;
+    if (bot->GetDistance(goal.giverPosition) > 10.0f)
+        return MoveFarTo(goal.giverPosition);
+    info.ObserveQuestAcquisition(bot, "arrived", goal.giverPosition);
+    return SearchQuestGiverAndAcceptOrReward();
 }
 
 bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
@@ -481,6 +573,7 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
         if (!GetQuestPOIPosAndObjectiveIdx(questId, poiInfo))
         {
             // can't find a poi pos to go, stop doing quest for now
+            botAI->rpgInfo.ObserveQuestAcquisition(bot, "attempt_failed", {}, false, 0, 0, 0, "ordinary_native_no_objective_or_progress");
             botAI->rpgInfo.ChangeToIdle();
             return true;
         }
@@ -517,6 +610,7 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
 
     if (!data.lastReachPOI)
     {
+        botAI->rpgInfo.ObserveQuestAcquisition(bot, "arrived", data.pos);
         data.lastReachPOI = getMSTime();
         return true;
     }
@@ -547,6 +641,7 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
             botAI->lowPriorityQuest.insert(questId);
             botAI->rpgStatistic.questAbandoned++;
             LOG_DEBUG("playerbots", "[New RPG] {} marked as abandoned quest {}", bot->GetName(), questId);
+            botAI->rpgInfo.ObserveQuestAcquisition(bot, "attempt_failed", {}, false, 0, 0, 0, "ordinary_native_no_objective_or_progress");
             botAI->rpgInfo.ChangeToIdle();
             return true;
         }
@@ -567,7 +662,8 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
 bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
 {
     uint32 questId = data.questId;
-    const Quest* quest = data.quest;
+    const Quest* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest) return false;
 
     if (data.objectiveIdx != -1)
     {
@@ -578,6 +674,7 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
         if (!GetQuestPOIPosAndObjectiveIdx(questId, poiInfo, true))
         {
             // can't find a poi pos to reward, stop doing quest for now
+            botAI->rpgInfo.ObserveQuestAcquisition(bot, "attempt_failed", {}, false, 0, 0, 0, "ordinary_native_no_turnin_route");
             botAI->rpgInfo.ChangeToIdle();
             return false;
         }
@@ -611,6 +708,7 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
     // the quest should be rewarded by SearchQuestGiverAndAcceptOrReward
     if (!data.lastReachPOI)
     {
+        botAI->rpgInfo.ObserveQuestAcquisition(bot, "arrived", data.pos);
         data.lastReachPOI = getMSTime();
         return true;
     }
@@ -622,6 +720,7 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
         botAI->lowPriorityQuest.insert(questId);
         botAI->rpgStatistic.questAbandoned++;
         LOG_DEBUG("playerbots", "[New RPG] {} marked as abandoned quest {}", bot->GetName(), questId);
+        botAI->rpgInfo.ObserveQuestAcquisition(bot, "attempt_failed", {}, false, 0, 0, 0, "ordinary_native_turnin_timeout");
         botAI->rpgInfo.ChangeToIdle();
         return true;
     }

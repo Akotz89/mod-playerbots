@@ -27,8 +27,8 @@ public:
 
 private:
     Creature* GetCreatureTarget();
-    void Iterate(Creature* creature, bool learnSpells, uint32 spellId);
-    void Learn(SpellInfo const* spellInfo, uint32 cost, std::ostringstream& out);
+    void Iterate(Creature* creature, bool learnSpells, uint32 spellId, bool manualRequest);
+    void Learn(Creature* creature, uint32 spellId, SpellInfo const* spellInfo, uint32 cost, std::ostringstream& out, bool manualRequest);
     void TellHeader(Creature* creature);
     void TellFooter(uint32 totalCost);
 };

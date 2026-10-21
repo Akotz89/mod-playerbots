@@ -76,6 +76,7 @@ enum ProfessionSpells
 bool OpenLootAction::Execute(Event /*event*/)
 {
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
+    if (!lootObject.IsLootPossible(bot)) return false;
     bool result = DoLoot(lootObject);
     if (result)
     {

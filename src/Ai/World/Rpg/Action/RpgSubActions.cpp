@@ -5,6 +5,8 @@
  */
 
 #include "RpgSubActions.h"
+#include "OwnerLearningControl.h"
+#include "TrainerAction.h"
 #include "BudgetValues.h"
 #include "ChooseRpgTargetAction.h"
 #include "EmoteAction.h"
@@ -274,6 +276,8 @@ bool RpgTrainAction::isUseful()
 
 bool RpgTrainAction::isPossible()
 {
+    if (owner_learning::Owned(botAI) && !owner_learning::AutomaticTrainer(botAI))
+        return false;
     GuidPosition gp = rpg->guidP();
 
     CreatureTemplate const* cinfo = gp.GetCreatureTemplate();
@@ -312,6 +316,23 @@ bool RpgTrainAction::isPossible()
 }
 
 std::string const RpgTrainAction::ActionName() { return "trainer"; }
+
+bool RpgTrainAction::Execute(Event event)
+{
+    if (!isUseful() || !isPossible())
+        return false;
+    // Generic trainer action prechecks resolve the master's selection before seeing
+    // this event. Bind the existing RPG target through its revalidating Execute path.
+    TrainerAction action(botAI);
+    bool const performed = action.Execute(ActionEvent(event));
+    rpg->AfterExecute(performed, true);
+    return performed;
+}
+
+Event RpgTrainAction::ActionEvent(Event /*event*/)
+{
+    return Event("rpg trainer", "auto");
+}
 
 bool RpgHealAction::Execute(Event /*event*/)
 {

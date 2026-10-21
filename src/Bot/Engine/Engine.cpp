@@ -583,7 +583,14 @@ bool Engine::ListenAndExecute(Action* action, Event event)
 
     if (actionExecutionListeners.Before(action, event))
     {
-        actionExecuted = actionExecutionListeners.AllowExecution(action, event) ? action->Execute(event) : true;
+        if (actionExecutionListeners.AllowExecution(action, event))
+        {
+            if (!botAI->InvalidateDecisionForHuman(event.GetAdmittedHumanOwner()))
+                return false;
+            actionExecuted = action->Execute(event);
+        }
+        else
+            actionExecuted = true;
     }
 
     if (botAI->HasStrategy("debug", BOT_STATE_NON_COMBAT))

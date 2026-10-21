@@ -62,6 +62,7 @@ public:
     }
 
     std::set<std::string> GetValues();
+    std::set<std::string> GetStrategies();
     std::set<std::string> GetSupportedStrategies();
     std::set<std::string> GetSupportedActions();
     std::string const FormatValues();

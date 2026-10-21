@@ -2742,3 +2742,14 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
 
 # Allow bots to be summoned near innkeepers
 AiPlayerbot.SummonAtInnkeepersEnabled = 1
+
+# CPI-224 ambient courtesy buffs. Default off; enable only after combined acceptance.
+# All options must be present/valid when enabled. No rank/level/item grants.
+AiPlayerbot.Courtesy.Enable = 0
+AiPlayerbot.Courtesy.IntervalMs = 1000
+AiPlayerbot.Courtesy.ScanBudget = 16
+AiPlayerbot.Courtesy.GrantBudget = 4
+AiPlayerbot.Courtesy.TargetBudget = 16
+AiPlayerbot.Courtesy.Radius = 30
+AiPlayerbot.Courtesy.MinimumManaPercent = 35
+AiPlayerbot.Courtesy.TimeBudgetUs = 2000

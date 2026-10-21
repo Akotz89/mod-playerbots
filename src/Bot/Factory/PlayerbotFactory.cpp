@@ -4,6 +4,7 @@
  */
 
 #include "PlayerbotFactory.h"
+#include "EarnedTalentRank.h"
 #include "AccountMgr.h"
 #include "AiFactory.h"
 #include "AiObjectContext.h"
@@ -1150,6 +1151,41 @@ void PlayerbotFactory::InitConsumables()
     }
 }
 
+// Native LearnPetTalent owns legality and debit; only already earned pet points are offered.
+static void LearnEarnedPetTalent(Player* bot, Pet* pet, TalentEntry const* talent, uint32 desired)
+{
+    if (!pet || !talent || !pet->GetFreeTalentPoints() || !desired || desired > MAX_PET_TALENT_RANK ||
+        !talent->RankID[desired - 1])
+        return;
+    CreatureTemplate const* creature = pet->GetCreatureTemplate();
+    CreatureFamilyEntry const* family = creature ? sCreatureFamilyStore.LookupEntry(creature->family) : nullptr;
+    TalentTabEntry const* tab = sTalentTabStore.LookupEntry(talent->TalentTab);
+    if (!family || family->petTalentType < 0 || family->petTalentType >= 3 || !tab ||
+        !((1u << family->petTalentType) & tab->petTalentMask))
+        return;
+    auto currentRank = [pet](TalentEntry const* entry)
+    {
+        uint32 current = 0;
+        if (entry)
+            for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+                if (entry->RankID[rank] && pet->HasSpell(entry->RankID[rank]))
+                    current = rank + 1;
+        return current;
+    };
+    if (currentRank(talent) >= desired)
+        return;
+    uint32 rank = 0;
+    if (talent->DependsOn)
+    {
+        TalentEntry const* dependency = sTalentStore.LookupEntry(talent->DependsOn);
+        if (dependency && earned_talent::NextRank(currentRank(dependency), talent->DependsOnRank + 1,
+                                                pet->GetFreeTalentPoints(), rank))
+            bot->LearnPetTalent(pet->GetGUID(), talent->DependsOn, rank);
+    }
+    if (earned_talent::NextRank(currentRank(talent), desired, pet->GetFreeTalentPoints(), rank))
+        bot->LearnPetTalent(pet->GetGUID(), talent->TalentID, rank);
+}
+
 void PlayerbotFactory::InitPetTalents()
 {
     if (bot->GetLevel() <= 70 && sPlayerbotAIConfig.limitTalentsExpansion)
@@ -1168,14 +1204,14 @@ void PlayerbotFactory::InitPetTalents()
         return;
     }
     CreatureFamilyEntry const* pet_family = sCreatureFamilyStore.LookupEntry(ci->family);
-    if (!pet_family || pet_family->petTalentType < 0)
+    if (!pet_family || pet_family->petTalentType < 0 || pet_family->petTalentType >= 3)
     {
         // LOG_INFO("playerbots", "{} init pet talents failed with petTalentType < 0({})", bot->GetName().c_str(),
         // pet_family->petTalentType);
         return;
     }
     std::map<uint32, std::vector<TalentEntry const*>> spells;
-    bool diveTypePet = (1LL << ci->family) & diveMask;
+    bool diveTypePet = ci->family < 64 && ((uint64(1) << ci->family) & diveMask);
 
     for (uint32 i = 0; i < sTalentStore.GetNumRows(); ++i)
     {
@@ -1186,7 +1222,7 @@ void PlayerbotFactory::InitPetTalents()
         TalentTabEntry const* talentTabInfo = sTalentTabStore.LookupEntry(talentInfo->TalentTab);
 
         // prevent learn talent for different family (cheating)
-        if (!((1 << pet_family->petTalentType) & talentTabInfo->petTalentMask))
+        if (!talentTabInfo || !((1u << pet_family->petTalentType) & talentTabInfo->petTalentMask))
             continue;
         bool diveClass = talentInfo->TalentID == 2201 || talentInfo->TalentID == 2208 || talentInfo->TalentID == 2219 ||
                          talentInfo->TalentID == 2203;
@@ -1222,23 +1258,11 @@ void PlayerbotFactory::InitPetTalents()
             {
                 int index = urand(0, spells_row.size() - 1);
                 TalentEntry const* talentInfo = spells_row[index];
-                int maxRank = 0;
-                for (uint32 rank = 0; rank < std::min((uint32)MAX_TALENT_RANK, (uint32)pet->GetFreeTalentPoints()); ++rank)
-                {
-                    uint32 spellId = talentInfo->RankID[rank];
-                    if (!spellId)
-                        continue;
-
-                    maxRank = rank;
-                }
-                // LOG_INFO("playerbots", "{} learn pet talent {}({})", bot->GetName().c_str(), talentInfo->TalentID,
-                // maxRank);
-                if (talentInfo->DependsOn)
-                {
-                    bot->LearnPetTalent(pet->GetGUID(), talentInfo->DependsOn,
-                                        std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                }
-                bot->LearnPetTalent(pet->GetGUID(), talentInfo->TalentID, maxRank);
+                uint32 desired = 0;
+                for (uint32 rank = 0; rank < MAX_PET_TALENT_RANK; ++rank)
+                    if (talentInfo->RankID[rank])
+                        desired = rank + 1;
+                LearnEarnedPetTalent(bot, pet, talentInfo, desired);
                 spells_row.erase(spells_row.begin() + index);
             }
         }
@@ -1259,35 +1283,13 @@ void PlayerbotFactory::InitPetTalents()
                 continue;
             for (std::vector<uint32>& p : sPlayerbotAIConfig.parsedHunterPetLinkOrder[spec][points])
             {
-                uint32 row = p[0], col = p[1], lvl = p[2];
-                uint32 talentID = 0;
-                uint32 learnLevel = 0;
+                if (p.size() < 3)
+                    continue;
+                uint32 row = p[0], col = p[1], desired = p[2];
                 std::vector<TalentEntry const*>& spell = spells[row];
                 for (TalentEntry const* talentInfo : spell)
-                {
-                    if (talentInfo->Col != col)
-                    {
-                        continue;
-                    }
-                    if (talentInfo->DependsOn)
-                    {
-                        bot->LearnPetTalent(pet->GetGUID(), talentInfo->DependsOn,
-                                            std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                    }
-                    talentID = talentInfo->TalentID;
-
-                    uint32 currentTalentRank = 0;
-                    for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
-                    {
-                        if (talentInfo->RankID[rank] && pet->HasSpell(talentInfo->RankID[rank]))
-                        {
-                            currentTalentRank = rank + 1;
-                            break;
-                        }
-                    }
-                    learnLevel = std::min(lvl, pet->GetFreeTalentPoints() + currentTalentRank) - 1;
-                }
-                bot->LearnPetTalent(pet->GetGUID(), talentID, learnLevel);
+                    if (talentInfo->Col == col)
+                        LearnEarnedPetTalent(bot, pet, talentInfo, desired);
                 if (pet->GetFreeTalentPoints() == 0)
                 {
                     break;
@@ -1517,6 +1519,36 @@ void PlayerbotFactory::ResetQuests()
     }
 }
 
+
+// Keep all template routes on native earned-point validation, including continuation.
+static void LearnEarnedTalent(Player* bot, TalentEntry const* talent, uint32 desired)
+{
+    if (!talent || !bot->GetFreeTalentPoints())
+        return;
+    TalentTabEntry const* tab = sTalentTabStore.LookupEntry(talent->TalentTab);
+    if (!tab || !(tab->ClassMask & bot->getClassMask()))
+        return;
+    auto currentRank = [bot](TalentEntry const* entry)
+    {
+        uint32 current = 0;
+        if (entry)
+            for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+                if (entry->RankID[rank] && bot->HasTalent(entry->RankID[rank], bot->GetActiveSpec()))
+                    current = rank + 1;
+        return current;
+    };
+    uint32 rank = 0;
+    if (talent->DependsOn)
+    {
+        TalentEntry const* dependency = sTalentStore.LookupEntry(talent->DependsOn);
+        if (dependency && earned_talent::NextRank(currentRank(dependency), talent->DependsOnRank + 1,
+                                                bot->GetFreeTalentPoints(), rank))
+            bot->LearnTalent(talent->DependsOn, rank);
+    }
+    if (earned_talent::NextRank(currentRank(talent), desired, bot->GetFreeTalentPoints(), rank))
+        bot->LearnTalent(talent->TalentID, rank);
+}
+
 uint32 PlayerbotFactory::InitTalentsTree(bool increment /*false*/, bool use_template /*true*/, bool reset /*false*/)
 {
     uint32 specTab;
@@ -1633,8 +1665,10 @@ void PlayerbotFactory::InitTalentsBySpecNo(Player* bot, int specNo, bool reset)
         }
         for (std::vector<uint32>& p : sPlayerbotAIConfig.parsedSpecLinkOrder[cls][specNo][level])
         {
+            if (p.size() != 4 || !bot->GetFreeTalentPoints())
+                break;
             uint32 tab = p[0], row = p[1], col = p[2], lvl = p[3];
-            uint32 talentID = -1;
+            TalentEntry const* selectedTalent = nullptr;
 
             std::vector<TalentEntry const*>& spells = spells_row[row];
             if (spells.size() <= 0)
@@ -1652,14 +1686,9 @@ void PlayerbotFactory::InitTalentsBySpecNo(Player* bot, int specNo, bool reset)
                 {
                     continue;
                 }
-                if (talentInfo->DependsOn)
-                {
-                    bot->LearnTalent(talentInfo->DependsOn,
-                                     std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                }
-                talentID = talentInfo->TalentID;
+                selectedTalent = talentInfo;
             }
-            bot->LearnTalent(talentID, std::min(lvl, bot->GetFreeTalentPoints()) - 1);
+            LearnEarnedTalent(bot, selectedTalent, lvl);
             if (bot->GetFreeTalentPoints() == 0)
             {
                 break;
@@ -1707,8 +1736,10 @@ void PlayerbotFactory::InitTalentsByParsedSpecLink(Player* bot, std::vector<std:
     }
     for (std::vector<uint32>& p : parsedSpecLink)
     {
+        if (p.size() != 4 || !bot->GetFreeTalentPoints())
+            break;
         uint32 tab = p[0], row = p[1], col = p[2], lvl = p[3];
-        uint32 talentID = -1;
+        TalentEntry const* selectedTalent = nullptr;
 
         std::vector<TalentEntry const*>& spells = spells_row[row];
         if (spells.size() <= 0)
@@ -1726,14 +1757,9 @@ void PlayerbotFactory::InitTalentsByParsedSpecLink(Player* bot, std::vector<std:
             {
                 continue;
             }
-            if (talentInfo->DependsOn)
-            {
-                bot->LearnTalent(talentInfo->DependsOn,
-                                 std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-            }
-            talentID = talentInfo->TalentID;
+            selectedTalent = talentInfo;
         }
-        bot->LearnTalent(talentID, std::min(lvl, bot->GetFreeTalentPoints()) - 1);
+        LearnEarnedTalent(bot, selectedTalent, lvl);
         if (bot->GetFreeTalentPoints() == 0)
         {
             break;
@@ -3457,21 +3483,11 @@ void PlayerbotFactory::InitTalents(uint32 specNo)
         {
             int index = urand(0, spells_row.size() - 1);
             TalentEntry const* talentInfo = spells_row[index];
-            int maxRank = 0;
-            for (uint32 rank = 0; rank < std::min((uint32)MAX_TALENT_RANK, bot->GetFreeTalentPoints()); ++rank)
-            {
-                uint32 spellId = talentInfo->RankID[rank];
-                if (!spellId)
-                    continue;
-
-                maxRank = rank;
-            }
-            if (talentInfo->DependsOn)
-            {
-                bot->LearnTalent(talentInfo->DependsOn,
-                                 std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-            }
-            bot->LearnTalent(talentInfo->TalentID, maxRank);
+            uint32 desired = 0;
+            for (uint32 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+                if (talentInfo->RankID[rank])
+                    desired = rank + 1;
+            LearnEarnedTalent(bot, talentInfo, desired);
             spells_row.erase(spells_row.begin() + index);
         }
 
@@ -3518,6 +3534,8 @@ void PlayerbotFactory::InitTalentsByTemplate(uint32 specTab)
         }
         for (std::vector<uint32>& p : sPlayerbotAIConfig.parsedSpecLinkOrder[cls][specIndex][level])
         {
+            if (p.size() != 4 || !bot->GetFreeTalentPoints())
+                break;
             uint32 tab = p[0], row = p[1], col = p[2], lvl = p[3];
             if (sPlayerbotAIConfig.limitTalentsExpansion && bot->GetLevel() <= 60 && (row > 6 || (row == 6 && col != 1)))
                 continue;
@@ -3525,8 +3543,7 @@ void PlayerbotFactory::InitTalentsByTemplate(uint32 specTab)
             if (sPlayerbotAIConfig.limitTalentsExpansion && bot->GetLevel() <= 70 && (row > 8 || (row == 8 && col != 1)))
                 continue;
 
-            uint32 talentID = 0;
-            uint32 learnLevel = 0;
+            TalentEntry const* selectedTalent = nullptr;
             std::vector<TalentEntry const*>& spells = spells_row[row];
             if (spells.size() <= 0)
             {
@@ -3543,25 +3560,9 @@ void PlayerbotFactory::InitTalentsByTemplate(uint32 specTab)
                 {
                     continue;
                 }
-                if (talentInfo->DependsOn)
-                {
-                    bot->LearnTalent(talentInfo->DependsOn,
-                                     std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                }
-                talentID = talentInfo->TalentID;
-
-                uint32 currentTalentRank = 0;
-                for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
-                {
-                    if (talentInfo->RankID[rank] && bot->HasTalent(talentInfo->RankID[rank], bot->GetActiveSpec()))
-                    {
-                        currentTalentRank = rank + 1;
-                        break;
-                    }
-                }
-                learnLevel = std::min(lvl, bot->GetFreeTalentPoints() + currentTalentRank) - 1;
+                selectedTalent = talentInfo;
             }
-            bot->LearnTalent(talentID, learnLevel);
+            LearnEarnedTalent(bot, selectedTalent, lvl);
             if (bot->GetFreeTalentPoints() == 0)
             {
                 break;

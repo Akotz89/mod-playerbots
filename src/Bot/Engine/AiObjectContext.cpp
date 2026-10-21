@@ -88,12 +88,12 @@ void AiObjectContext::Load(std::vector<std::string> data)
     for (std::vector<std::string>::iterator i = data.begin(); i != data.end(); ++i)
     {
         std::string const row = *i;
-        std::vector<std::string> parts = split(row, '>');
-        if (parts.size() != 2)
+        std::string::size_type const separator = row.find('>');
+        if (separator == std::string::npos)
             continue;
 
-        std::string const name = parts[0];
-        std::string const text = parts[1];
+        std::string const name = row.substr(0, separator);
+        std::string const text = row.substr(separator + 1);
 
         UntypedValue* value = GetUntypedValue(name);
         if (!value)
@@ -123,6 +123,8 @@ UntypedValue* AiObjectContext::GetUntypedValue(std::string const name)
 }
 
 std::set<std::string> AiObjectContext::GetValues() { return valueContexts.GetCreated(); }
+
+std::set<std::string> AiObjectContext::GetStrategies() { return strategyContexts.GetCreated(); }
 
 std::set<std::string> AiObjectContext::GetSupportedStrategies() { return strategyContexts.supports(); }
 

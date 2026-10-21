@@ -166,11 +166,13 @@ class RpgTrainAction : public RpgSubAction
 public:
     RpgTrainAction(PlayerbotAI* botAI, std::string const name = "rpg train") : RpgSubAction(botAI, name) {}
 
+    bool Execute(Event event) override;
     bool isPossible() override;
     bool isUseful() override;
 
 private:
     std::string const ActionName() override;
+    Event ActionEvent(Event event) override;
 };
 
 class RpgHealAction : public RpgSubAction

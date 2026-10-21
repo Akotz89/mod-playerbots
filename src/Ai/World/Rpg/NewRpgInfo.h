@@ -8,6 +8,7 @@
 #define PLAYERBOTS_NEWRPGINFO_H
 
 #include "Define.h"
+#include <string_view>
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
 #include "QuestDef.h"
@@ -16,6 +17,8 @@
 #include "TravelMgr.h"
 
 using NewRpgStatusTransitionProb = std::vector<std::vector<int>>;
+
+class Player;
 
 struct NewRpgInfo
 {
@@ -48,6 +51,14 @@ struct NewRpgInfo
     {
         const Quest* quest{nullptr};
         uint32 questId{0};
+        uintptr_t questTemplateToken{0};
+        bool acquiring{false};
+        int32 giverEntry{0};
+        WorldPosition giverPosition{};
+        std::string identityKey;
+        std::string rewardKind;
+        uint32 rewardIndex{0};
+        uint32 rewardItem{0};
         int32 objectiveIdx{0};
         WorldPosition pos{};
         uint32 lastReachPOI{0};
@@ -76,8 +87,20 @@ struct NewRpgInfo
 
     bool pythonQuestGoal{false};
     uint32 pythonGoalAccountId{0};
+    uint64 pythonGoalSession{0};
+    uint64 pythonGoalRevision{0};
     uint32 pythonGoalRefreshedAt{0};
     uint64 pythonGoalGeneration{0};
+
+    // Value-only recorder token; retained receipts live in the population bridge, never in an AI pointer.
+    uint64 pythonAcquisitionRecord{0};
+    void StartQuestAcquisition(Player* player) noexcept;
+    void ObserveQuestAcquisition(Player* player, std::string_view kind,
+        WorldPosition const& target = WorldPosition(), bool outcome = true,
+        uint64 itemGuid = 0, uint32 itemEntry = 0, uint32 count = 0, std::string_view reason = "") noexcept;
+    void CloseQuestAcquisition(std::string_view reason) noexcept;
+    static void EndQuestAcquisitionTurnIn(uint64 recordId, bool ownerCurrent) noexcept;
+    static void InvalidateQuestAcquisitionRecord(uint64 recordId, std::string_view reason) noexcept;
 
     uint32 startT{0};  // start timestamp of the current status
 
@@ -115,6 +138,9 @@ struct NewRpgInfo
     void ChangeToIdle();
     bool CanChangeTo(NewRpgStatus status);
     void Reset();
+    void ClearPythonQuestGoal();
+    bool ValidatePythonQuestAcquire(Player* player, ObjectGuid giver = ObjectGuid());
+    bool ValidatePythonQuestTurnIn(Player* player, Quest const* quest, uint32& rewardIndex);
     void SetMoveFarTo(WorldPosition pos);
     std::string ToString();
 };

@@ -22,6 +22,13 @@ protected:
     bool Attack(Unit* target, bool with_pet = true);
 };
 
+class DecisionAttackAction : public AttackAction
+{
+public:
+    explicit DecisionAttackAction(PlayerbotAI* botAI) : AttackAction(botAI, "decision attack") {}
+    bool Execute(Event event) override;
+};
+
 class AttackMyTargetAction : public AttackAction
 {
 public:

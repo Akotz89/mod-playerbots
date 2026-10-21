@@ -6,12 +6,14 @@
 
 #include "ExternalEventHelper.h"
 #include "ChatHelper.h"
+#include "ChatCommandTrigger.h"
 #include "Playerbots.h"
 #include "Trigger.h"
 
-bool ExternalEventHelper::ParseChatCommand(std::string const command, Player* owner)
+bool ExternalEventHelper::ParseChatCommand(std::string const command, Player* owner, CommandOrigin origin,
+                                          uint64 admittedHumanOwner)
 {
-    if (HandleCommand(command, "", owner))
+    if (HandleCommand(command, "", owner, origin, admittedHumanOwner))
         return true;
 
     size_t i = std::string::npos;
@@ -26,7 +28,7 @@ bool ExternalEventHelper::ParseChatCommand(std::string const command, Player* ow
 
         i = found - 1;
 
-        if (HandleCommand(name, param, owner))
+        if (HandleCommand(name, param, owner, origin, admittedHumanOwner))
             return true;
     }
 
@@ -35,8 +37,8 @@ bool ExternalEventHelper::ParseChatCommand(std::string const command, Player* ow
 
     if (sPlayerbotAIConfig.enableAutoTradeOnItemMention)
     {
-        HandleCommand("c", command, owner);
-        HandleCommand("t", command, owner);
+        HandleCommand("c", command, owner, origin, admittedHumanOwner);
+        HandleCommand("t", command, owner, origin, admittedHumanOwner);
     }
 
     return true;
@@ -58,13 +60,17 @@ void ExternalEventHelper::HandlePacket(std::map<uint16, std::string>& handlers, 
     trigger->ExternalEvent(p, owner);
 }
 
-bool ExternalEventHelper::HandleCommand(std::string const name, std::string const param, Player* owner)
+bool ExternalEventHelper::HandleCommand(std::string const name, std::string const param, Player* owner,
+                                       CommandOrigin origin, uint64 admittedHumanOwner)
 {
     Trigger* trigger = aiObjectContext->GetTrigger(name);
     if (!trigger)
         return false;
 
-    trigger->ExternalEvent(param, owner);
+    if (auto* chatTrigger = dynamic_cast<ChatCommandTrigger*>(trigger))
+        chatTrigger->ExternalEvent(param, owner, origin, admittedHumanOwner);
+    else
+        trigger->ExternalEvent(param, owner);
 
     return true;
 }

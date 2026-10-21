@@ -353,9 +353,10 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
         if (!botAI)
             return;
 
-        // Queue group cleanup operation for world thread
-        auto cleanupOp = std::make_unique<BotLogoutGroupCleanupOperation>(guid);
-        PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(cleanupOp));
+        // Capture settings before logout destroys the player and AI.
+        Group* group = bot->GetGroup();
+        if (group && !bot->InBattleground() && !bot->InBattlegroundQueue() && IsRealPlayer(botAI->GetMaster()))
+            PlayerbotRepository::instance().Save(botAI);
 
         LOG_DEBUG("playerbots", "Bot {} logging out", bot->GetName().c_str());
 

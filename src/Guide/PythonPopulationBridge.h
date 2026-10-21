@@ -4,11 +4,21 @@
 #include "Define.h"
 
 #include <string>
+#include <vector>
 
 class Player;
 
 namespace PlayerbotsPopulation
 {
+struct CourtesyCandidate
+{
+    uint32 characterGuid{0};
+};
+
+std::vector<CourtesyCandidate> ReadCourtesyCandidates(uint32& cursor, uint32 scanBudget, uint32 resultBudget,
+    uint32* scanned = nullptr, bool* exhausted = nullptr);
+bool CourtesyEligible(uint32 characterGuid);
+
 struct OwnerBindingState
 {
     bool available{false};

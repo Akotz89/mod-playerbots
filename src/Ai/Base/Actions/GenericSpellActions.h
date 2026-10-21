@@ -17,6 +17,13 @@ class PlayerbotAI;
 class Unit;
 class WorldObject;
 
+class DecisionHealAction : public Action
+{
+public:
+    explicit DecisionHealAction(PlayerbotAI* botAI) : Action(botAI, "decision heal") {}
+    bool Execute(Event event) override;
+};
+
 class CastSpellAction : public Action
 {
 public:
