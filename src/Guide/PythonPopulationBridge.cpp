@@ -47,9 +47,15 @@
 #include <sstream>
 #include <locale>
 #include <limits>
+#include <tuple>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 using namespace PyEng::Population;
 
@@ -366,6 +372,21 @@ std::string Sha256Hex(std::string const& value)
 {
     auto const digest = Acore::Crypto::SHA256::GetDigestOf(value);
     return Acore::Impl::ByteArrayToHexStr(digest.data(), digest.size());
+}
+
+uint64 NativeProcessId()
+{
+#ifdef _WIN32
+    return static_cast<uint64>(_getpid());
+#else
+    return static_cast<uint64>(getpid());
+#endif
+}
+
+uint64 MonotonicNanoseconds()
+{
+    return static_cast<uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 bool HasV2OwnerLedger()
@@ -1131,12 +1152,21 @@ public:
 
 class PlayerbotsPopulationBridge final : public Bridge
 {
+    uint64 _providerConstructedMonotonicNs{0};
+    std::string _processIncarnation;
     std::unordered_map<std::string, std::vector<GearVendorOffer>> _vendorQuotes;
     std::unordered_map<std::string, uint64> _vendorQuoteRevision;
     std::unordered_map<std::string, std::unordered_set<std::string>> _vendorConsumed;
     std::unordered_set<std::string> _vendorInFlight;
     std::unordered_set<std::string> _vendorAmbiguous;
 public:
+    PlayerbotsPopulationBridge()
+        : _providerConstructedMonotonicNs(MonotonicNanoseconds()),
+          _processIncarnation("pid:" + std::to_string(NativeProcessId()) +
+              ":provider_constructed_monotonic_ns:" + std::to_string(_providerConstructedMonotonicNs))
+    {
+    }
+
     StrategicSnapshot ReadQuestSnapshot(std::string const& identityKey,
                                         uint32 observedQuestId) override
     {
@@ -1608,6 +1638,153 @@ public:
         result.reason = result.valid ? "" : "actor_session_generation_phase_or_control_mismatch";
         if (!result.valid) for (auto& verdict : result.verdicts) { verdict.verdict = "unknown"; verdict.reason = result.reason; }
         fact(result.valid); result.observedStateGeneration = lowerDigest(semantics.str());
+        return result;
+    }
+
+    LoadedSourceSnapshot ReadLoadedSourceSnapshot(
+        std::vector<LoadedSourceNaturalKey> const& requestedKeys) override
+    {
+        if (requestedKeys.empty() || requestedKeys.size() > 64)
+            throw std::runtime_error("loaded source snapshot query must contain 1..64 natural keys");
+
+        LoadedSourceSnapshot result;
+        result.processIncarnation = _processIncarnation;
+        result.providerConstructedMonotonicNs = _providerConstructedMonotonicNs;
+        result.captureMonotonicNs = MonotonicNanoseconds();
+        result.reloadGenerationAvailable = false;
+        auto finishCopyOut = [&]()
+        {
+            result.copyOutCompletedMonotonicNs = MonotonicNanoseconds();
+            result.copyOutDurationNs = result.copyOutCompletedMonotonicNs >= result.captureMonotonicNs ?
+                result.copyOutCompletedMonotonicNs - result.captureMonotonicNs : 0;
+        };
+        result.phase = ReadPhaseSnapshot();
+        if (!result.phase.enabled || !result.phase.policyValid)
+        {
+            result.reason = "shared_phase_unavailable";
+            finishCopyOut();
+            return result;
+        }
+
+        std::vector<LoadedSourceNaturalKey> keys = requestedKeys;
+        std::sort(keys.begin(), keys.end(), [](LoadedSourceNaturalKey const& left, LoadedSourceNaturalKey const& right)
+        {
+            return std::tie(left.sourceTable, left.entry, left.slot, left.item) <
+                std::tie(right.sourceTable, right.entry, right.slot, right.item);
+        });
+        std::set<std::tuple<std::string, uint32, uint32, uint32>> uniqueKeys;
+        for (LoadedSourceNaturalKey const& key : keys)
+        {
+            if (key.sourceTable.empty() || key.sourceTable.size() > 64 || !key.entry || !key.item ||
+                !uniqueKeys.emplace(key.sourceTable, key.entry, key.slot, key.item).second)
+                throw std::runtime_error("loaded source natural key malformed or duplicated");
+
+            LoadedVendorSourceObservation row;
+            row.sourceTable = key.sourceTable; row.entry = key.entry; row.slot = key.slot; row.item = key.item;
+            row.family = key.sourceTable == "npc_vendor" ? "vendor" : "unknown";
+            row.stableJoinKey = key.sourceTable == "npc_vendor" ?
+                "vendor:" + std::to_string(key.entry) + ":slot:" + std::to_string(key.slot) +
+                    ":item:" + std::to_string(key.item) : "";
+            if (key.sourceTable != "npc_vendor")
+                row.reason = "unsupported_native_source_table";
+            else
+            {
+                row.lookupEvaluated = true;
+                VendorItemData const* list = sObjectMgr->GetNpcVendorItemList(key.entry);
+                if (!list)
+                    row.reason = "vendor_source_list_not_loaded";
+                else if (key.slot >= list->GetItemCount())
+                    row.reason = "vendor_source_slot_not_loaded";
+                else
+                {
+                    VendorItem const* offer = list->GetItem(key.slot);
+                    if (!offer)
+                        row.reason = "vendor_source_slot_empty";
+                    else if (offer->item != key.item)
+                        row.reason = "vendor_source_slot_item_mismatch";
+                    else
+                    {
+                        row.matched = true;
+                        row.maxCount = offer->maxcount;
+                        row.incrementTime = offer->incrtime;
+                        row.extendedCost = offer->ExtendedCost;
+                        if (ItemTemplate const* item = sObjectMgr->GetItemTemplate(offer->item))
+                        {
+                            row.itemTemplateKnown = true;
+                            row.buyPrice = item->BuyPrice;
+                            row.buyCount = item->BuyCount;
+                            row.itemRequiredLevel = item->RequiredLevel;
+                            row.allowableClass = item->AllowableClass;
+                            row.allowableRace = item->AllowableRace;
+                            row.requiredSkill = item->RequiredSkill;
+                            row.requiredSkillRank = item->RequiredSkillRank;
+                        }
+                        else
+                            row.reason = "vendor_item_template_not_loaded";
+                        // Actor-specific vendor condition truth remains on the existing
+                        // ReadVendorOffers/action path; this static source snapshot does not infer it.
+                    }
+                }
+
+                // These are the current Core1 vendor projection fields for which this
+                // loaded native row has no directly equivalent, proven semantic value.
+                for (char const* field : {"purchase_minimum", "purchase_maximum", "chance_numerator",
+                    "chance_denominator", "frontier_minimum", "frontier_maximum", "stages", "phase_mask",
+                    "spawn_mask", "event_ids", "pool_ids", "condition", "group_size", "capabilities",
+                    "profession_skill_id", "profession_skill_value", "alternative", "reagents", "unresolved"})
+                    if (std::find(row.unknownSemantics.begin(), row.unknownSemantics.end(), field) == row.unknownSemantics.end())
+                        row.unknownSemantics.emplace_back(field);
+                row.unknownSemantics.emplace_back("VerifiedBuild");
+                if (!row.itemTemplateKnown)
+                    for (char const* field : {"item_template", "buy_price", "buy_count", "item_requirements"})
+                        row.unknownSemantics.emplace_back(field);
+            }
+            row.unknownMetrics = {"copper", "travel", "attempt", "risk", "contention"};
+            result.rows.push_back(std::move(row));
+        }
+
+        PhaseSnapshot const finalPhase = ReadPhaseSnapshot();
+        if (!finalPhase.enabled || !finalPhase.policyValid || finalPhase.phaseId != result.phase.phaseId ||
+            finalPhase.levelCeiling != result.phase.levelCeiling || finalPhase.policyDigest != result.phase.policyDigest)
+        {
+            result.reason = "shared_phase_changed_during_loaded_source_snapshot";
+            result.rows.clear();
+            finishCopyOut();
+            return result;
+        }
+
+        std::ostringstream snapshot;
+        snapshot.imbue(std::locale::classic());
+        auto field = [&](auto const& value)
+        {
+            std::ostringstream token; token.imbue(std::locale::classic()); token << value;
+            std::string const text = token.str(); snapshot << text.size() << ':' << text;
+        };
+        field("cpi211-loaded-item-sources-v1");
+        field("rows"); field(result.rows.size());
+        for (LoadedVendorSourceObservation const& row : result.rows)
+        {
+            field("row");
+            field("family");
+            field(row.family); field("source_table"); field(row.sourceTable);
+            field("natural_key.entry"); field(row.entry); field("natural_key.slot"); field(row.slot);
+            field("natural_key.item"); field(row.item); field("stable_join_key"); field(row.stableJoinKey);
+            field("lookup_evaluated"); field(row.lookupEvaluated);
+            field("matched"); field(row.matched); field("reason"); field(row.reason);
+            field("item_template_known"); field(row.itemTemplateKnown);
+            field("maxcount"); field(row.maxCount); field("incrtime"); field(row.incrementTime);
+            field("ExtendedCost"); field(row.extendedCost); field("buy_price"); field(row.buyPrice);
+            field("buy_count"); field(row.buyCount); field("required_level"); field(row.itemRequiredLevel);
+            field("allowable_class"); field(row.allowableClass); field("allowable_race"); field(row.allowableRace);
+            field("required_skill"); field(row.requiredSkill); field("required_skill_rank"); field(row.requiredSkillRank);
+            field("unknown_semantics"); field(row.unknownSemantics.size());
+            for (std::string const& unknown : row.unknownSemantics) field(unknown);
+            field("unknown_metrics"); field(row.unknownMetrics.size());
+            for (std::string const& unknown : row.unknownMetrics) field(unknown);
+        }
+        result.sourceSnapshotId = Sha256Hex(snapshot.str());
+        result.valid = true;
+        finishCopyOut();
         return result;
     }
 
