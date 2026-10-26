@@ -1744,6 +1744,13 @@ public:
         }
 
         PhaseSnapshot const finalPhase = ReadPhaseSnapshot();
+        if (!sPythonEngine->IsNativeCapabilityCallAllowed() || sPythonEngine->IsReloading())
+        {
+            result.reason = "native_lifecycle_changed_during_loaded_source_snapshot";
+            result.rows.clear();
+            finishCopyOut();
+            return result;
+        }
         if (!finalPhase.enabled || !finalPhase.policyValid || finalPhase.phaseId != result.phase.phaseId ||
             finalPhase.levelCeiling != result.phase.levelCeiling || finalPhase.policyDigest != result.phase.policyDigest)
         {
