@@ -1,4 +1,5 @@
 #include "PopulationBridge.h"
+#include "PythonEngine.h"
 #include "AccountMgr.h"
 #include "Config.h"
 #include "Cryptography/CryptoHash.h"
@@ -1284,6 +1285,14 @@ public:
             throw std::runtime_error("strategic session differs from admitted durable actor");
         result.sessionIncarnation = player->GetSession()->GetPartySessionIncarnation();
         result.strategicGeneration = StrategicGeneration.load();
+        PlayerbotAI* const actorAI = GET_PLAYERBOT_AI(player);
+        if (!actorAI)
+        {
+            result.controlAllowed = false;
+            result.reason = "playerbot_ai_unavailable";
+            return result;
+        }
+        result.goalRevision = actorAI->rpgInfo.pythonGoalRevision;
         if (!result.controlAllowed)
             return result;
         // Synchronous world-thread observation: no callbacks, yields or retained native pointers.
@@ -1672,10 +1681,10 @@ public:
             return std::tie(left.sourceTable, left.entry, left.slot, left.item) <
                 std::tie(right.sourceTable, right.entry, right.slot, right.item);
         });
-        std::set<std::tuple<std::string, uint32, uint32, uint32>> uniqueKeys;
+        std::set<std::tuple<std::string, uint32, uint32, int32>> uniqueKeys;
         for (LoadedSourceNaturalKey const& key : keys)
         {
-            if (key.sourceTable.empty() || key.sourceTable.size() > 64 || !key.entry || !key.item ||
+            if (key.sourceTable.empty() || key.sourceTable.size() > 64 || !key.entry || key.item == 0 ||
                 !uniqueKeys.emplace(key.sourceTable, key.entry, key.slot, key.item).second)
                 throw std::runtime_error("loaded source natural key malformed or duplicated");
 
@@ -1687,23 +1696,29 @@ public:
                     ":item:" + std::to_string(key.item) : "";
             if (key.sourceTable != "npc_vendor")
                 row.reason = "unsupported_native_source_table";
+            else if (key.item < 0)
+            {
+                row.lookupEvaluated = true;
+                row.reason = "vendor_reference_row_not_direct_item";
+            }
             else
             {
                 row.lookupEvaluated = true;
                 VendorItemData const* list = sObjectMgr->GetNpcVendorItemList(key.entry);
                 if (!list)
                     row.reason = "vendor_source_list_not_loaded";
-                else if (key.slot >= list->GetItemCount())
-                    row.reason = "vendor_source_slot_not_loaded";
                 else
                 {
-                    VendorItem const* offer = list->GetItem(key.slot);
-                    if (!offer)
-                        row.reason = "vendor_source_slot_empty";
-                    else if (offer->item != key.item)
-                        row.reason = "vendor_source_slot_item_mismatch";
+                    VendorItemSourceLookup const lookup = list->FindNpcVendorRow(key.slot, static_cast<uint32>(key.item));
+                    if (lookup.matchCount == 0)
+                        row.reason = "vendor_source_row_not_loaded_or_filtered";
+                    else if (lookup.matchCount > 1)
+                        row.reason = "vendor_source_row_ambiguous";
                     else
                     {
+                        VendorItem const* offer = lookup.item;
+                        if (!offer)
+                            throw std::runtime_error("unique loaded vendor source lookup returned no item");
                         row.matched = true;
                         row.maxCount = offer->maxcount;
                         row.incrementTime = offer->incrtime;
@@ -2119,6 +2134,11 @@ public:
                 ItemTemplate const* proto = sObjectMgr->GetItemTemplate(offer->item);
                 GearVendorOffer row;
                 row.vendorGuid = guid.GetRawValue(); row.vendorEntry = vendor->GetEntry(); row.vendorSlot = slot;
+                if (offer->sourceKind == VendorItemSourceKind::NpcVendorRow)
+                {
+                    row.sourceSlot = offer->sourceSlot;
+                    row.sourceSlotKnown = true;
+                }
                 row.sourceId = "vendor:" + std::to_string(row.vendorEntry) + ":slot:" + std::to_string(slot) +
                     ":item:" + std::to_string(offer->item) + ":cost:" + std::to_string(offer->ExtendedCost);
                 row.accountId = snapshot.accountId; row.characterGuid = snapshot.characterGuid;
