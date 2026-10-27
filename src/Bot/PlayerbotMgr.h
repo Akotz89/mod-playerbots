@@ -10,6 +10,7 @@
 #include "ObjectGuid.h"
 #include "Player.h"
 #include "PlayerbotAIBase.h"
+#include <string>
 
 class ChatHandler;
 class PlayerbotAI;
@@ -56,6 +57,11 @@ public:
 
 protected:
     virtual void OnBotLoginInternal(Player* const bot) = 0;
+
+    // The integration test owns this in-memory actor registration; it never enters
+    // the database-backed OnBotLogin path.
+    friend bool RegisterCpi211TestOnlyPopulationActor(std::string const&, Player*);
+    friend void UnregisterCpi211TestOnlyPopulationActor(std::string const&, Player*);
 
     PlayerBotMap playerBots;
     static std::unordered_map<ObjectGuid, uint32> botLoading;

@@ -187,6 +187,8 @@ protected:
     void OnBotLoginInternal(Player* const bot) override;
 
 private:
+    friend class VendorSourceTestAccess;
+
     RandomPlayerbotMgr() : PlayerbotHolder()
     {
         this->playersLevel = sPlayerbotAIConfig.randombotStartingLevel;

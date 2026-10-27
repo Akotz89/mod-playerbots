@@ -110,6 +110,17 @@ struct ManagedProgressionPolicy
 std::mutex ProgressionMutex;
 std::map<uint32, ManagedProgressionPolicy> ManagedPolicies;
 std::unordered_map<std::string, uint32> AdmittedProgressionIdentities;
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+// Populated only by the Core integration fixture. These identities use the real
+// provider and actor checks but deliberately do not represent durable admission.
+struct Cpi211TestOnlyActorRegistration
+{
+    Player* player{nullptr};
+    uint32 accountId{0};
+    uint64 sessionIncarnation{0};
+};
+std::unordered_map<std::string, Cpi211TestOnlyActorRegistration> Cpi211TestOnlyPopulationActors;
+#endif
 constexpr uint32 ProgressionPolicyLeaseMilliseconds = 5000;
 std::atomic<uint64> StrategicGeneration{1};
 std::atomic<int8> OwnerLedgerAvailability{-1};
@@ -1194,6 +1205,10 @@ public:
                 return result;
             }
             result.characterGuid = found->second;
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+            auto const testActor = Cpi211TestOnlyPopulationActors.find(identityKey);
+            bool const testOnlyActor = testActor != Cpi211TestOnlyPopulationActors.end();
+#endif
             if (!refreshDurable)
             {
                 auto policy = ManagedPolicies.find(result.characterGuid);
@@ -1204,8 +1219,36 @@ public:
                 }
                 result.accountId = policy->second.accountId;
             }
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+            else if (testOnlyActor)
+            {
+                auto policy = ManagedPolicies.find(result.characterGuid);
+                if (policy == ManagedPolicies.end() || !policy->second.admitted || !policy->second.accountId)
+                {
+                    result.reason = "admission_cache_unavailable";
+                    return result;
+                }
+                result.accountId = policy->second.accountId;
+            }
+            else
+#endif
+                result.accountId = 0;
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+            if (testOnlyActor)
+            {
+                Player* const player = testActor->second.player;
+                if (!player || player != sRandomPlayerbotMgr.GetPlayerBot(player->GetGUID()) ||
+                    !player->GetSession() || player->GetSession()->isLogingOut() ||
+                    player->GetSession()->GetAccountId() != testActor->second.accountId ||
+                    player->GetSession()->GetPartySessionIncarnation() != testActor->second.sessionIncarnation ||
+                    result.characterGuid != player->GetGUID().GetCounter())
+                    throw std::runtime_error("test-only actor session binding changed");
+                if (refreshDurable)
+                    result.accountId = testActor->second.accountId;
+            }
+#endif
         }
-        if (refreshDurable)
+        if (refreshDurable && !result.accountId)
         {
             QueryResult binding = PlayerbotsDatabase.Query(
                 "SELECT account_id, character_guid FROM playerbots_population_identity "
@@ -1810,6 +1853,229 @@ public:
         return result;
     }
 
+    LoadedVendorEnumeration EnumerateLoadedVendorSources(uint32 rowCap) override
+    {
+        constexpr uint32 MaximumRows = 16384;
+        LoadedVendorEnumeration result;
+        result.rowCap = rowCap;
+        result.processIncarnation = _processIncarnation;
+        result.providerConstructedMonotonicNs = _providerConstructedMonotonicNs;
+        result.captureMonotonicNs = MonotonicNanoseconds();
+        result.reloadGenerationAvailable = false;
+        auto finishCopyOut = [&]()
+        {
+            result.copyOutCompletedMonotonicNs = MonotonicNanoseconds();
+            result.copyOutDurationNs = result.copyOutCompletedMonotonicNs >= result.captureMonotonicNs ?
+                result.copyOutCompletedMonotonicNs - result.captureMonotonicNs : 0;
+        };
+        if (rowCap == 0 || rowCap > MaximumRows)
+        {
+            result.reason = "loaded vendor enumeration cap must be 1..16384";
+            finishCopyOut();
+            return result;
+        }
+        if (!sPythonEngine->IsNativeCapabilityCallAllowed() || sPythonEngine->IsReloading())
+        {
+            result.reason = "loaded vendor enumeration requires the enabled native world thread outside reload";
+            finishCopyOut();
+            return result;
+        }
+        result.phase = ReadPhaseSnapshot();
+        if (!result.phase.enabled || !result.phase.policyValid)
+        {
+            result.reason = "shared_phase_unavailable";
+            finishCopyOut();
+            return result;
+        }
+
+        std::vector<LoadedVendorEnumerationRow> rows;
+        rows.reserve(rowCap);
+        bool stoppedAtCap = false;
+        for (auto const& [entry, vendorData] : sObjectMgr->GetNpcVendorItemLists())
+        {
+            if (result.scannedVendorLists == rowCap)
+            {
+                stoppedAtCap = true;
+                break;
+            }
+            ++result.scannedVendorLists;
+            for (std::size_t loadedIndex = 0; loadedIndex < vendorData.m_items.size(); ++loadedIndex)
+            {
+                if (result.scannedLoadedRows == rowCap)
+                {
+                    stoppedAtCap = true;
+                    break;
+                }
+                ++result.scannedLoadedRows;
+                VendorItem const* offer = vendorData.m_items[loadedIndex];
+                LoadedVendorEnumerationRow row;
+                row.entry = entry;
+                row.loadedIndex = static_cast<uint32>(loadedIndex);
+                row.unknownMetrics = {"copper", "travel", "attempt", "risk", "contention"};
+                for (char const* field : {"purchase_minimum", "purchase_maximum", "chance_numerator",
+                    "chance_denominator", "frontier_minimum", "frontier_maximum", "stages", "phase_mask",
+                    "spawn_mask", "event_ids", "pool_ids", "condition", "group_size", "capabilities",
+                    "profession_skill_id", "profession_skill_value", "alternative", "reagents", "unresolved",
+                    "VerifiedBuild"})
+                    row.unknownSemantics.emplace_back(field);
+
+                if (!offer)
+                {
+                    row.sourceKind = "unknown";
+                    row.reason = "null_loaded_vendor_list_entry";
+                    row.unknownSemantics.emplace_back("source_identity");
+                    ++result.unknownSourceRows;
+                    rows.push_back(std::move(row));
+                    continue;
+                }
+
+                row.loadedItem = offer->item;
+                row.maxCount = offer->maxcount;
+                row.incrementTime = offer->incrtime;
+                row.extendedCost = offer->ExtendedCost;
+                switch (offer->sourceKind)
+                {
+                    case VendorItemSourceKind::NpcVendorRow:
+                        row.sourceKind = "npc_vendor_row";
+                        if (offer->item <= static_cast<uint32>(std::numeric_limits<int32>::max()))
+                        {
+                            row.sourceKeyKnown = true;
+                            row.rawSlot = offer->sourceSlot;
+                            row.rawItem = static_cast<int32>(offer->item);
+                            ++result.joinableSourceRows;
+                        }
+                        else
+                        {
+                            row.reason = "loaded_source_item_exceeds_signed_npc_vendor_range";
+                            row.unknownSemantics.emplace_back("source_identity");
+                            ++result.unknownSourceRows;
+                        }
+                        break;
+                    case VendorItemSourceKind::VendorReferenceExpansion:
+                        row.sourceKind = "vendor_reference_expansion";
+                        row.reason = "reference_expansion_has_no_preserved_raw_npc_vendor_key";
+                        row.unknownSemantics.emplace_back("source_identity");
+                        ++result.unsupportedReferenceRows;
+                        break;
+                    case VendorItemSourceKind::Runtime:
+                        row.sourceKind = "runtime_vendor_item";
+                        row.reason = "runtime_vendor_item_has_no_raw_npc_vendor_key";
+                        row.unknownSemantics.emplace_back("source_identity");
+                        ++result.runtimeRows;
+                        break;
+                    default:
+                        row.sourceKind = "unknown";
+                        row.reason = "vendor_source_kind_unknown";
+                        row.unknownSemantics.emplace_back("source_identity");
+                        ++result.unknownSourceRows;
+                        break;
+                }
+
+                if (row.sourceKeyKnown)
+                {
+                    if (ItemTemplate const* item = sObjectMgr->GetItemTemplate(offer->item))
+                    {
+                        row.itemTemplateKnown = true;
+                        row.buyPrice = item->BuyPrice;
+                        row.buyCount = item->BuyCount;
+                        row.itemRequiredLevel = item->RequiredLevel;
+                        row.allowableClass = item->AllowableClass;
+                        row.allowableRace = item->AllowableRace;
+                        row.requiredSkill = item->RequiredSkill;
+                        row.requiredSkillRank = item->RequiredSkillRank;
+                    }
+                    else
+                    {
+                        row.reason = "vendor_item_template_not_loaded";
+                        row.unknownSemantics.emplace_back("item_template");
+                        row.unknownSemantics.emplace_back("buy_price");
+                        row.unknownSemantics.emplace_back("buy_count");
+                        row.unknownSemantics.emplace_back("item_requirements");
+                    }
+                }
+                else
+                {
+                    row.unknownSemantics.emplace_back("item_template_source_join");
+                }
+                rows.push_back(std::move(row));
+            }
+            if (stoppedAtCap)
+                break;
+        }
+
+        result.truncated = stoppedAtCap;
+        result.complete = !stoppedAtCap;
+        std::sort(rows.begin(), rows.end(), [](LoadedVendorEnumerationRow const& left, LoadedVendorEnumerationRow const& right)
+        {
+            return std::tie(left.entry, left.loadedIndex, left.sourceKind, left.rawSlot, left.rawItem, left.loadedItem) <
+                std::tie(right.entry, right.loadedIndex, right.sourceKind, right.rawSlot, right.rawItem, right.loadedItem);
+        });
+        result.copiedRows = static_cast<uint32>(rows.size());
+        result.rows = std::move(rows);
+        PhaseSnapshot const finalPhase = ReadPhaseSnapshot();
+        if (!sPythonEngine->IsNativeCapabilityCallAllowed() || sPythonEngine->IsReloading())
+        {
+            result.reason = "native_lifecycle_changed_during_loaded_vendor_enumeration";
+            result.valid = false;
+            result.complete = false;
+            result.nativeSourceSnapshotId.clear();
+            result.rows.clear();
+            result.copiedRows = 0;
+            finishCopyOut();
+            return result;
+        }
+        if (!finalPhase.enabled || !finalPhase.policyValid || finalPhase.phaseId != result.phase.phaseId ||
+            finalPhase.levelCeiling != result.phase.levelCeiling || finalPhase.policyDigest != result.phase.policyDigest)
+        {
+            result.reason = "shared_phase_changed_during_loaded_vendor_enumeration";
+            result.valid = false;
+            result.complete = false;
+            result.nativeSourceSnapshotId.clear();
+            result.rows.clear();
+            result.copiedRows = 0;
+            finishCopyOut();
+            return result;
+        }
+
+        std::ostringstream snapshot;
+        snapshot.imbue(std::locale::classic());
+        auto field = [&](auto const& value)
+        {
+            std::ostringstream token; token.imbue(std::locale::classic()); token << value;
+            std::string const text = token.str(); snapshot << text.size() << ':' << text;
+        };
+        field("cpi211-loaded-vendor-enumeration-v1");
+        field("rows"); field(result.rows.size());
+        for (LoadedVendorEnumerationRow const& row : result.rows)
+        {
+            field("row"); field("entry"); field(row.entry); field("loaded_index"); field(row.loadedIndex);
+            field("source_kind"); field(row.sourceKind); field("source_key_known"); field(row.sourceKeyKnown);
+            if (row.sourceKeyKnown) { field("raw_slot"); field(row.rawSlot); field("raw_item"); field(row.rawItem); }
+            field("loaded_item"); field(row.loadedItem); field("maxcount"); field(row.maxCount);
+            field("incrtime"); field(row.incrementTime); field("ExtendedCost"); field(row.extendedCost);
+            field("item_template_known"); field(row.itemTemplateKnown);
+            if (row.itemTemplateKnown)
+            {
+                field(row.buyPrice); field(row.buyCount); field(row.itemRequiredLevel); field(row.allowableClass);
+                field(row.allowableRace); field(row.requiredSkill); field(row.requiredSkillRank);
+            }
+            field("reason"); field(row.reason); field("unknown_semantics"); field(row.unknownSemantics.size());
+            for (std::string const& unknown : row.unknownSemantics) field(unknown);
+            field("unknown_metrics"); field(row.unknownMetrics.size());
+            for (std::string const& unknown : row.unknownMetrics) field(unknown);
+        }
+        field("unsupported_reference_rows"); field(result.unsupportedReferenceRows);
+        field("runtime_rows"); field(result.runtimeRows);
+        field("unknown_source_rows"); field(result.unknownSourceRows);
+        result.valid = true;
+        if (result.complete)
+            result.nativeSourceSnapshotId = Sha256Hex(snapshot.str());
+        else
+            result.reason = "loaded_vendor_enumeration_truncated_no_whole_snapshot_id";
+        finishCopyOut();
+        return result;
+    }
+
     AcquisitionCatalog ReadAcquisitionCatalog() override
     {
         AcquisitionCatalog result;
@@ -2187,7 +2453,12 @@ public:
         uint64& revision = _vendorQuoteRevision[identityKey];
         if (!same && ++revision == 0) throw std::runtime_error("vendor quote revision exhausted");
         // Restoring an earlier quote set must never reissue its historical request identity.
-        for (auto& offer : offers) offer.requestId = Sha256Hex(offer.witnessId + "|" + std::to_string(revision));
+        for (auto& offer : offers)
+        {
+            offer.requestId = Sha256Hex(offer.witnessId + "|" + std::to_string(revision));
+            std::transform(offer.requestId.begin(), offer.requestId.end(), offer.requestId.begin(),
+                [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        }
         auto& consumed = _vendorConsumed[identityKey];
         for (auto it = consumed.begin(); it != consumed.end();)
             if (std::none_of(offers.begin(), offers.end(), [&](GearVendorOffer const& row) { return row.requestId == *it; }))
@@ -2495,6 +2766,41 @@ public:
         {
             if (!Hex64(key))
                 continue;
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+            Player* testOnlyPlayer = nullptr;
+            uint32 testOnlyAccountId = 0;
+            uint64 testOnlySessionIncarnation = 0;
+            {
+                std::lock_guard<std::mutex> lock(ProgressionMutex);
+                auto const testActor = Cpi211TestOnlyPopulationActors.find(key);
+                if (testActor != Cpi211TestOnlyPopulationActors.end())
+                {
+                    testOnlyPlayer = testActor->second.player;
+                    testOnlyAccountId = testActor->second.accountId;
+                    testOnlySessionIncarnation = testActor->second.sessionIncarnation;
+                }
+            }
+            if (testOnlyPlayer)
+            {
+                if (sRandomPlayerbotMgr.GetPlayerBot(testOnlyPlayer->GetGUID()) != testOnlyPlayer ||
+                    !testOnlyPlayer->GetSession() || testOnlyPlayer->GetSession()->isLogingOut() ||
+                    testOnlyPlayer->GetSession()->GetAccountId() != testOnlyAccountId ||
+                    testOnlyPlayer->GetSession()->GetPartySessionIncarnation() != testOnlySessionIncarnation)
+                    continue;
+                EarnedProgress row;
+                row.identityKey = key;
+                row.characterGuid = testOnlyPlayer->GetGUID().GetCounter();
+                row.level = testOnlyPlayer->GetLevel();
+                row.xp = testOnlyPlayer->GetUInt32Value(PLAYER_XP);
+                row.playedSeconds = testOnlyPlayer->GetTotalPlayedTime();
+                row.mapId = testOnlyPlayer->GetMapId();
+                row.zoneId = testOnlyPlayer->GetZoneId();
+                row.sessionRequested = true;
+                row.online = testOnlyPlayer->IsInWorld();
+                result.push_back(std::move(row));
+                continue;
+            }
+#endif
             QueryResult binding = PlayerbotsDatabase.Query(
                 "SELECT character_guid, session_requested FROM playerbots_population_identity "
                 "WHERE identity_key = '{}' AND admitted = 1 AND character_guid IS NOT NULL", key);
@@ -2959,6 +3265,66 @@ public:
     void OnShutdown() override { PlayerbotsCourtesy::Cancel(); }
 };
 } // namespace
+
+#ifdef CPI211_NATIVE_TEST_FIXTURE
+// These deliberately test-named registration functions are compiled only into
+// test configurations. Ordinary production builds retain durable admission and
+// earned-state queries without the fixture registry.
+bool RegisterCpi211TestOnlyPopulationActor(std::string const& identityKey, Player* player)
+{
+    if (!Hex64(identityKey) || !player || !player->IsInWorld() || !player->GetSession() ||
+        player->GetSession()->isLogingOut() || !GET_PLAYERBOT_AI(player) ||
+        !player->GetSession()->GetPartySessionIncarnation() || !sRandomPlayerbotMgr.IsRandomBot(player))
+        return false;
+
+    auto const phase = ProgressionSystem::GetSharedPhaseSnapshot();
+    if (!phase.enabled || !phase.policyValid || !phase.phaseLevelCeiling ||
+        !sRandomPlayerbotMgr.playerBots.emplace(player->GetGUID(), player).second)
+        return false;
+
+    std::lock_guard<std::mutex> lock(ProgressionMutex);
+    uint32 const guid = player->GetGUID().GetCounter();
+    uint32 const accountId = player->GetSession()->GetAccountId();
+    if (!accountId || Cpi211TestOnlyPopulationActors.count(identityKey) ||
+        AdmittedProgressionIdentities.count(identityKey) || ManagedPolicies.count(guid))
+    {
+        sRandomPlayerbotMgr.playerBots.erase(player->GetGUID());
+        return false;
+    }
+
+    ManagedProgressionPolicy policy;
+    policy.ceiling = std::min<uint8>(phase.phaseLevelCeiling, 19);
+    policy.held = false;
+    policy.refreshedAt = getMSTime();
+    policy.schedulerEligible = true;
+    policy.phaseConfigDigest = phase.policyConfigDigest;
+    policy.admitted = true;
+    policy.accountId = accountId;
+    ManagedPolicies.emplace(guid, std::move(policy));
+    AdmittedProgressionIdentities.emplace(identityKey, guid);
+    Cpi211TestOnlyPopulationActors.emplace(identityKey,
+        Cpi211TestOnlyActorRegistration{player, accountId, player->GetSession()->GetPartySessionIncarnation()});
+    return true;
+}
+
+void UnregisterCpi211TestOnlyPopulationActor(std::string const& identityKey, Player* player)
+{
+    std::lock_guard<std::mutex> lock(ProgressionMutex);
+    auto const testActor = Cpi211TestOnlyPopulationActors.find(identityKey);
+    if (testActor == Cpi211TestOnlyPopulationActors.end() || testActor->second.player != player)
+        return;
+    uint32 const guid = player ? player->GetGUID().GetCounter() : 0;
+    Cpi211TestOnlyPopulationActors.erase(testActor);
+    AdmittedProgressionIdentities.erase(identityKey);
+    ManagedPolicies.erase(guid);
+    if (player)
+    {
+        auto const registered = sRandomPlayerbotMgr.playerBots.find(player->GetGUID());
+        if (registered != sRandomPlayerbotMgr.playerBots.end() && registered->second == player)
+            sRandomPlayerbotMgr.playerBots.erase(registered);
+    }
+}
+#endif
 
 namespace
 {
