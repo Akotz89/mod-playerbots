@@ -10,30 +10,35 @@
 
 void NewRpgInfo::ChangeToGoGrind(WorldPosition pos)
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = GoGrind{pos};
 }
 
 void NewRpgInfo::ChangeToGoCamp(WorldPosition pos)
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = GoCamp{pos};
 }
 
 void NewRpgInfo::ChangeToWanderNpc()
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = WanderNpc{};
 }
 
 void NewRpgInfo::ChangeToWanderRandom()
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = WanderRandom{};
 }
 
 void NewRpgInfo::ChangeToDoQuest(uint32 questId, const Quest* quest)
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     DoQuest do_quest;
     do_quest.questId = questId;
@@ -43,6 +48,7 @@ void NewRpgInfo::ChangeToDoQuest(uint32 questId, const Quest* quest)
 
 void NewRpgInfo::ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition flightMasterPos, std::vector<uint32> path)
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     TravelFlight flight;
     flight.flightMasterEntry = flightMasterEntry;
@@ -54,6 +60,7 @@ void NewRpgInfo::ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition fl
 
 void NewRpgInfo::ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId)
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     OutdoorPvP pvp;
     pvp.capturePointSpawnId = capturePointSpawnId;
@@ -62,12 +69,14 @@ void NewRpgInfo::ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId)
 
 void NewRpgInfo::ChangeToRest()
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = Rest{};
 }
 
 void NewRpgInfo::ChangeToIdle()
 {
+    ClearPythonQuestGoal();
     startT = getMSTime();
     data = Idle{};
 }
@@ -79,6 +88,7 @@ bool NewRpgInfo::CanChangeTo(NewRpgStatus)
 
 void NewRpgInfo::Reset()
 {
+    ClearPythonQuestGoal();
     data = Idle{};
     startT = getMSTime();
 }
@@ -193,4 +203,15 @@ std::string NewRpgInfo::ToString()
             out << "UNKNOWN";
     }, data);
     return out.str();
+}
+
+void NewRpgInfo::ClearPythonQuestGoal()
+{
+    CloseQuestAcquisition("goal_reset_or_lost");
+    ++pythonGoalRevision;
+    pythonQuestGoal = false;
+    pythonGoalAccountId = 0;
+    pythonGoalSession = 0;
+    pythonGoalRefreshedAt = 0;
+    pythonGoalGeneration = 0;
 }

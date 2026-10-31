@@ -79,14 +79,6 @@ static void ParseLevelMgrExcludeNames(std::string const& csv, std::vector<std::s
     }
 }
 
-static std::string NormalizeNamedPartyValue(std::string value)
-{
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char c) { return !std::isspace(c); }));
-    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char c) { return !std::isspace(c); }).base(), value.end());
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    return value;
-}
-
 bool PlayerbotAIConfig::Initialize()
 {
     LOG_INFO("server.loading", "Initializing mod-playerbots, based on AI Playerbots by ike3 and the original Playerbots by blueboy");
@@ -252,38 +244,6 @@ bool PlayerbotAIConfig::Initialize()
         unobtainableItems);
 
     botAutologin = sConfigMgr->GetOption<bool>("AiPlayerbot.BotAutologin", false);
-    namedPartyEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.Enable", false);
-    namedPartyAutoLogin = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.AutoLogin", true);
-    namedPartyRestoreGroup = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.RestoreGroup", true);
-    namedPartyQuiet = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.Quiet", true);
-    namedPartyAutoTalents = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.AutoTalents", true);
-    namedPartyAutoLearnTrainerSpells =
-        sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.AutoLearnTrainerSpells", true);
-    namedPartyAutoLearnClassQuestSpells =
-        sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.AutoLearnClassQuestSpells", true);
-    namedPartyPreferClassArmorType =
-        sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.PreferClassArmorType", true);
-    namedPartyPreferredSpecWeapons =
-        sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.PreferredSpecWeapons", true);
-    namedPartyAutonomousPull = sConfigMgr->GetOption<bool>("AiPlayerbot.NamedParty.AutonomousPull", false);
-    namedPartyAccountId = sConfigMgr->GetOption<uint32>("AiPlayerbot.NamedParty.AccountId", 0);
-    namedPartySpacing = std::max(0.5f, sConfigMgr->GetOption<float>("AiPlayerbot.NamedParty.Spacing", 3.0f));
-    namedPartyMaster = sConfigMgr->GetOption<std::string>("AiPlayerbot.NamedParty.Master", "");
-    namedPartyFormation = NormalizeNamedPartyValue(
-        sConfigMgr->GetOption<std::string>("AiPlayerbot.NamedParty.Formation", "shield"));
-    namedPartyMembers.clear();
-    namedPartySpecs.clear();
-    namedPartyRoles.clear();
-    ParseLevelMgrExcludeNames(
-        sConfigMgr->GetOption<std::string>("AiPlayerbot.NamedParty.Members", ""), namedPartyMembers);
-    for (std::string const& member : namedPartyMembers)
-    {
-        std::string const normalizedMember = NormalizeNamedPartyValue(member);
-        namedPartySpecs[normalizedMember] = NormalizeNamedPartyValue(sConfigMgr->GetOption<std::string>(
-            "AiPlayerbot.NamedParty.Spec." + member, "", false));
-        namedPartyRoles[normalizedMember] = NormalizeNamedPartyValue(sConfigMgr->GetOption<std::string>(
-            "AiPlayerbot.NamedParty.Role." + member, "", false));
-    }
     randomBotAutologin = sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotAutologin", true);
     randomBotPersistentProgression =
         sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotPersistentProgression", false);
@@ -840,92 +800,6 @@ bool PlayerbotAIConfig::Initialize()
     return true;
 }
 
-bool PlayerbotAIConfig::IsNamedPartyMaster(Player const* player) const
-{
-    if (!namedPartyEnabled || !player || !player->GetSession())
-        return false;
-
-    return player->GetSession()->GetAccountId() == namedPartyAccountId &&
-           NormalizeNamedPartyValue(player->GetName()) == NormalizeNamedPartyValue(namedPartyMaster);
-}
-
-bool PlayerbotAIConfig::IsNamedPartyMember(Player const* player) const
-{
-    if (!namedPartyEnabled || !player || !player->GetSession() ||
-        player->GetSession()->GetAccountId() != namedPartyAccountId)
-        return false;
-
-    std::string const name = NormalizeNamedPartyValue(player->GetName());
-    return std::any_of(namedPartyMembers.begin(), namedPartyMembers.end(), [&](std::string const& member)
-    {
-        return NormalizeNamedPartyValue(member) == name;
-    });
-}
-
-bool PlayerbotAIConfig::IsDeathKnightLoginDisabled() const
-{
-    // This switch is the Playerbots-side policy boundary. The selected
-    // Progression System phase profile sets it explicitly; legacy database
-    // residue or per-character quest state must never override that profile.
-    return disableDeathKnightLogin;
-}
-
-int32 PlayerbotAIConfig::GetNamedPartySpecNo(Player const* player) const
-{
-    if (!IsNamedPartyMember(player))
-        return -1;
-
-    auto const configured = namedPartySpecs.find(NormalizeNamedPartyValue(player->GetName()));
-    if (configured == namedPartySpecs.end() || configured->second.empty())
-        return -1;
-
-    uint32 const cls = player->getClass();
-    for (uint32 spec = 0; spec < MAX_SPECNO; ++spec)
-    {
-        if (NormalizeNamedPartyValue(premadeSpecName[cls][spec]) == configured->second)
-            return static_cast<int32>(spec);
-    }
-
-    return -1;
-}
-
-int32 PlayerbotAIConfig::GetNamedPartySpecTab(Player const* player) const
-{
-    int32 const specNo = GetNamedPartySpecNo(player);
-    if (specNo < 0)
-        return -1;
-
-    uint32 const cls = player->getClass();
-    std::array<uint32, 3> points = {0, 0, 0};
-    for (std::vector<uint32> const& talent : parsedSpecLinkOrder[cls][specNo][80])
-    {
-        if (talent.size() >= 4 && talent[0] < points.size())
-            points[talent[0]] += talent[3];
-    }
-
-    return static_cast<int32>(std::distance(points.begin(), std::max_element(points.begin(), points.end())));
-}
-
-bool PlayerbotAIConfig::ShouldPreferClassArmorType(Player const* player) const
-{
-    return preferClassArmorType || (namedPartyPreferClassArmorType && IsNamedPartyMember(player));
-}
-
-bool PlayerbotAIConfig::ShouldPreferSpecWeapons(Player const* player) const
-{
-    return preferredSpecWeapons || (namedPartyPreferredSpecWeapons && IsNamedPartyMember(player));
-}
-
-bool PlayerbotAIConfig::ShouldAllowAutonomousPull(Player const* player) const
-{
-    return !IsNamedPartyMember(player) || namedPartyAutonomousPull;
-}
-
-float PlayerbotAIConfig::GetFormationSpacing(Player const* player) const
-{
-    return IsNamedPartyMember(player) ? namedPartySpacing : followDistance;
-}
-
 // Loads AiPlayerbot.LevelBrackets.* and AiPlayerbot.ResetBotLevel.* (see RandomBotLevelMgr). Also
 // re-run on ".reload config" via RandomBotLevelWorldScript::OnAfterConfigLoad. Bracket
 // bounds/percentages are only the as-configured values here; RandomBotLevelMgr::LoadConfig()
@@ -1098,6 +972,26 @@ bool PlayerbotAIConfig::IsInPvpProhibitedZone(uint32 id)
 bool PlayerbotAIConfig::IsInPvpProhibitedArea(uint32 id)
 {
     return find(pvpProhibitedAreaIds.begin(), pvpProhibitedAreaIds.end(), id) != pvpProhibitedAreaIds.end();
+}
+
+bool PlayerbotAIConfig::IsDeathKnightLoginDisabled() const
+{
+    return disableDeathKnightLogin;
+}
+
+bool PlayerbotAIConfig::ShouldPreferClassArmorType(Player const* /*player*/) const
+{
+    return preferClassArmorType;
+}
+
+bool PlayerbotAIConfig::ShouldPreferSpecWeapons(Player const* /*player*/) const
+{
+    return preferredSpecWeapons;
+}
+
+bool PlayerbotAIConfig::ShouldAllowAutonomousPull(Player const* /*player*/) const
+{
+    return true;
 }
 
 bool PlayerbotAIConfig::IsRestrictedHealerDPSMap(uint32 mapId) const

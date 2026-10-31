@@ -287,7 +287,7 @@ public:
         if (!group)
             return Formation::NullLocation;
 
-        float range = sPlayerbotAIConfig.GetFormationSpacing(bot);
+        float range = sPlayerbotAIConfig.followDistance;
 
         Player* master = GetMaster();
         if (!master)
@@ -340,8 +340,6 @@ public:
 
         return Formation::NullLocation;
     }
-
-    float GetMaxDistance() override { return sPlayerbotAIConfig.GetFormationSpacing(bot); }
 };
 
 class FarFormation : public FollowFormation
@@ -506,13 +504,7 @@ float Formation::GetFollowAngle()
 }
 
 FormationValue::FormationValue(PlayerbotAI* botAI)
-    : ManualSetValue<Formation*>(
-          botAI,
-          sPlayerbotAIConfig.IsNamedPartyMember(botAI->GetBot()) &&
-                  sPlayerbotAIConfig.namedPartyFormation == "shield"
-              ? static_cast<Formation*>(new ShieldFormation(botAI))
-              : static_cast<Formation*>(new ChaosFormation(botAI)),
-          "formation")
+    : ManualSetValue<Formation*>(botAI, new ChaosFormation(botAI), "formation")
 {
 }
 

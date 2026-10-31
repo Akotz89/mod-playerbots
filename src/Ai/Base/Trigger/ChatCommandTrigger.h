@@ -8,6 +8,7 @@
 #define PLAYERBOTS_CHATCOMMANDTRIGGER_H
 
 #include "Trigger.h"
+#include "Event.h"
 
 class Event;
 class Player;
@@ -19,13 +20,16 @@ public:
     ChatCommandTrigger(PlayerbotAI* botAI, std::string const command);
 
     void ExternalEvent(std::string const param, Player* owner = nullptr) override;
+    void ExternalEvent(std::string const param, Player* owner, CommandOrigin origin, uint64 admittedHumanOwner);
     Event Check() override;
     void Reset() override;
 
 private:
     std::string param;
     bool triggered;
-    Player* owner;
+    uint64 ownerGuid = 0;
+    CommandOrigin origin = CommandOrigin::Internal;
+    uint64 admittedHumanOwner = 0;
 };
 
 #endif

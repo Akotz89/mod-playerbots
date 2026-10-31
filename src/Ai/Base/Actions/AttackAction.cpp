@@ -28,6 +28,27 @@ bool AttackAction::Execute(Event /*event*/)
     return Attack(target);
 }
 
+bool DecisionAttackAction::Execute(Event event)
+{
+    ObjectGuid targetGuid = event.getObject();
+    if (!botAI->TakeDecisionAttack(targetGuid))
+        return false;
+
+    botAI->decisionAttackResult = false;
+    Unit* target = botAI->GetUnit(targetGuid);
+    if (!target || target->GetMapId() != bot->GetMapId() || target->GetInstanceId() != bot->GetInstanceId())
+        return false;
+
+    bool result = Attack(target);
+    botAI->decisionAttackResult = result;
+    if (result)
+    {
+        context->GetValue<GuidVector>("prioritized targets")->Set({targetGuid});
+        context->GetValue<ObjectGuid>("pull target")->Set(targetGuid);
+    }
+    return result;
+}
+
 bool AttackMyTargetAction::Execute(Event /*event*/)
 {
     Player* master = GetMaster();

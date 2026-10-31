@@ -47,6 +47,11 @@ bool LootAction::Execute(Event /*event*/)
 
 bool LootAction::isUseful()
 {
+    if (!sPlayerbotAIConfig.freeMethodLoot && bot->GetGroup() &&
+        bot->GetGroup()->GetLootMethod() == FREE_FOR_ALL && !IsSelfBot(bot))
+        return AI_VALUE(LootObjectStack*, "available loot")->GetLoot(
+            sPlayerbotAIConfig.lootDistance).skillId != SKILL_NONE;
+
     return sPlayerbotAIConfig.freeMethodLoot || !bot->GetGroup() ||
     bot->GetGroup()->GetLootMethod() != FREE_FOR_ALL || IsSelfBot(bot);
 }
@@ -71,6 +76,7 @@ enum ProfessionSpells
 bool OpenLootAction::Execute(Event /*event*/)
 {
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
+    if (!lootObject.IsLootPossible(bot)) return false;
     bool result = DoLoot(lootObject);
     if (result)
     {

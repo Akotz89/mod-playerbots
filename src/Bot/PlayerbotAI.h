@@ -10,6 +10,7 @@
 #include "ChatFilter.h"
 #include "ChatHelper.h"
 #include "CreatureData.h"
+#include "DecisionControl.h"
 #include "Event.h"
 #include "ForceRebuff.h"
 #include "Item.h"
@@ -19,12 +20,19 @@
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotSecurity.h"
 #include "PlayerbotTextMgr.h"
+#include "SharedDefines.h"
 #include "SpellAuras.h"
 #include "Util.h"
 #include "WorldPacket.h"
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <stack>
 
 class AiObjectContext;
+class DecisionAttackAction;
+class DecisionHealAction;
+
 class Creature;
 class Engine;
 class ExternalEventHelper;
@@ -361,30 +369,32 @@ class ChatCommandHolder
 {
 public:
     ChatCommandHolder(std::string const command, Player* owner = nullptr, uint32 type = CHAT_MSG_WHISPER,
-                      time_t time = 0)
-        : command(command), owner(owner), type(type), time(time)
-    {
-    }
-    ChatCommandHolder(ChatCommandHolder const& other)
-        : command(other.command), owner(other.owner), type(other.type), time(other.time)
-    {
-    }
+                      time_t time = 0, CommandOrigin origin = CommandOrigin::Internal, uint64 admittedHumanOwner = 0);
+    ChatCommandHolder(ChatCommandHolder const& other) = default;
 
     const std::string& GetCommand() { return command; }
-    Player* GetOwner() { return owner; }
+    uint64 GetOwnerGuid() const { return ownerGuid; }
+    CommandOrigin GetOrigin() const { return origin; }
+    uint64 GetAdmittedHumanOwner() const { return admittedHumanOwner; }
     uint32& GetType() { return type; }
     time_t& GetTime() { return time; }
 
 private:
     std::string const command;
-    Player* owner;
+    uint64 ownerGuid;
     uint32 type;
     time_t time;
+    CommandOrigin origin;
+    uint64 admittedHumanOwner;
 };
 
 class PlayerbotAI : public PlayerbotAIBase
 {
 public:
+    // One expiring courtesy permit; no player/target pointer survives a tick.
+    void ArmCourtesyBuff(uint64 permit) { courtesyPermit.store(permit, std::memory_order_release); }
+    uint64 TakeCourtesyBuff() { return courtesyPermit.exchange(0, std::memory_order_acq_rel); }
+
     PlayerbotAI();
     PlayerbotAI(Player* bot);
     virtual ~PlayerbotAI();
@@ -393,7 +403,9 @@ public:
     void UpdateAIInternal(uint32 elapsed, bool minimal = false) override;
 
     std::string const HandleRemoteCommand(std::string const command);
-    void HandleCommand(uint32 type, std::string const text, Player* fromPlayer);
+    void HandleCommand(uint32 type, std::string const text, Player* fromPlayer,
+                       CommandOrigin origin = CommandOrigin::Human);
+    bool InvalidateDecisionForHuman(uint64 admittedHumanOwner);
     void QueueChatResponse(const ChatQueuedReply reply);
     void HandleBotOutgoingPacket(WorldPacket const& packet);
     void HandleMasterIncomingPacket(WorldPacket const& packet);
@@ -570,7 +582,35 @@ public:
     BotCheatMask GetCheat() { return cheatMask; }
     void SetCheat(BotCheatMask mask) { cheatMask = mask; }
 
-    void SetMaster(Player* newMaster) { master = newMaster; }
+    struct DecisionModeStatus
+    {
+        uint64 botGuid = 0, lifetime = 0, revision = 0;
+        bool automatic = false;
+    };
+    enum class DecisionModeResult { Ok, Denied, Stale, Exhausted };
+    bool ReadDecisionMode(Player* requester, uint64 expectedBotGuid, DecisionModeStatus& out);
+    DecisionModeResult SetDecisionMode(Player* requester, uint64 expectedBotGuid, uint64 expectedLifetime,
+                                       uint64 expectedRevision, bool automatic, DecisionModeStatus& out);
+    uint64 GetDecisionLifetime() const { return decisionControl.lifetime; }
+    enum class DecisionChoice { Wait, Execute };
+    struct DecisionObservation
+    {
+        std::optional<DecisionControl::Ticket> ticket;
+        bool automatic = false, eligible = false, heal2050Learned = false;
+        uint32 casterHealth = 0, casterMaxHealth = 0, targetHealth = 0, targetMaxHealth = 0;
+        uint32 mana = 0, maxMana = 0;
+    };
+    struct DecisionResult
+    {
+        bool admitted = false, native = false;
+        std::optional<uint32> castResult;
+        std::string reason;
+    };
+    DecisionObservation ObserveDecision(Player* requester, DecisionControl::Operation operation, uint64 target);
+    DecisionResult SubmitDecision(Player* requester, DecisionControl::Ticket const& ticket, DecisionChoice choice,
+                                  std::function<bool()> const& authorize = {});
+
+    void SetMaster(Player* newMaster);
     AiObjectContext* GetAiObjectContext() { return aiObjectContext; }
     ChatHelper* GetChatHelper() { return &chatHelper; }
     bool IsOpposing(Player* player);
@@ -612,13 +652,34 @@ public:
     void AddTimedEvent(std::function<void()> callback, uint32 delayMs);
 
 private:
+    std::atomic<uint64> courtesyPermit{0};
+
     static void _fillGearScoreData(Player* player, Item* item, std::vector<uint32>* gearScore, uint32& twoHandScore,
                                    bool mixed = false);
     bool IsTellAllowed(PlayerbotSecurityLevel securityLevel = PLAYERBOT_SECURITY_ALLOW_ALL);
     void UpdateAIGroupMaster();
     Item* FindItemInInventory(std::function<bool(ItemTemplate const*)> checkItem) const;
     void HandleCommands();
-    void HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang = LANG_UNIVERSAL);
+    void HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang = LANG_UNIVERSAL,
+                       CommandOrigin origin = CommandOrigin::Human);
+    bool HandleDecisionCommand(std::string const& command, Player* requester, CommandOrigin origin,
+                               uint64& admittedHumanOwner);
+    bool ReadDecisionContext(Player* requester, DecisionControl::Context& context);
+    bool ReadDecisionTargetContext(Player* requester, DecisionControl::Operation operation, uint64 target,
+                                   bool requireFocus, DecisionControl::Context& context);
+    DecisionObservation ObserveDecisionTarget(Player* requester, DecisionControl::Operation operation,
+                                              uint64 target, bool requireFocus);
+    bool TakeDecisionAttack(ObjectGuid target);
+    struct DecisionHealDispatch
+    {
+        std::function<bool()> authorize;
+        std::optional<DecisionControl::Ticket> admission;
+        std::optional<SpellCastResult> result;
+    };
+    bool IsDecisionHealTarget(Player* target);
+    std::shared_ptr<DecisionHealDispatch> TakeDecisionHeal(ObjectGuid target);
+    friend class DecisionAttackAction;
+    friend class DecisionHealAction;
     inline bool IsValidUnit(const Unit* unit) const
     {
         return unit && unit->IsInWorld() && !unit->IsDuringRemoveFromWorld();
@@ -654,6 +715,12 @@ protected:
     Position jumpDestination = Position();
     uint32 nextTransportCheck = 0;
     bool spellInterruptRequested = false;
+private:
+    DecisionControl decisionControl;
+    std::optional<DecisionControl::Ticket> admittedDecision;
+    std::function<bool()> decisionAuthorization;
+    std::optional<bool> decisionAttackResult;
+    std::shared_ptr<DecisionHealDispatch> decisionHealDispatch;
 };
 
 #endif

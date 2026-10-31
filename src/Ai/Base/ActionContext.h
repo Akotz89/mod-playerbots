@@ -107,6 +107,8 @@ public:
         creators["shoot"] = &ActionContext::shoot;
         creators["lifeblood"] = &ActionContext::lifeblood;
         creators["arcane torrent"] = &ActionContext::arcane_torrent;
+        creators["decision attack"] = &ActionContext::decision_attack;
+        creators["decision heal"] = &ActionContext::decision_heal;
         creators["pull my target"] = &ActionContext::pull_my_target;
         creators["pull rti target"] = &ActionContext::pull_rti_target;
         creators["pull start"] = &ActionContext::pull_start;
@@ -332,6 +334,8 @@ private:
     static Action* return_to_pull_position(PlayerbotAI* botAI) { return new ReturnToPullPositionAction(botAI); }
     static Action* reach_pull(PlayerbotAI* botAI) { return new ReachPullAction(botAI); }
     static Action* mana_tap(PlayerbotAI* botAI) { return new CastManaTapAction(botAI); }
+    static Action* decision_attack(PlayerbotAI* botAI) { return new DecisionAttackAction(botAI); }
+    static Action* decision_heal(PlayerbotAI* botAI) { return new DecisionHealAction(botAI); }
     static Action* end_pull(PlayerbotAI* botAI) { return new ChangeCombatStrategyAction(botAI, "-pull"); }
     static Action* cancel_channel(PlayerbotAI* botAI) { return new CancelChannelAction(botAI); }
 

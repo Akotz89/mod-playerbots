@@ -136,7 +136,7 @@ bool CastCustomSpellAction::Execute(Event event)
         botAI->SetNextCheckDelay(sPlayerbotAIConfig.reactDelay);
 
         msg << "cast " << text;
-        botAI->HandleCommand(CHAT_MSG_WHISPER, msg.str(), master);
+        botAI->HandleCommand(CHAT_MSG_WHISPER, msg.str(), master, CommandOrigin::Internal);
         return true;
     }
 
@@ -171,7 +171,7 @@ bool CastCustomSpellAction::Execute(Event event)
         {
             std::ostringstream cmd;
             cmd << castString(target) << " " << text << " " << (castCount - 1);
-            botAI->HandleCommand(CHAT_MSG_WHISPER, cmd.str(), master);
+            botAI->HandleCommand(CHAT_MSG_WHISPER, cmd.str(), master, CommandOrigin::Internal);
             msg << "|cffffff00(x" << (castCount - 1) << " left)|r";
         }
 
@@ -293,7 +293,7 @@ bool CastRandomSpellAction::Execute(Event event)
             {
                 std::ostringstream cmd;
                 cmd << "castnc " << chat->FormatWorldobject(wo) + " " << spellId << " " << 19;
-                botAI->HandleCommand(CHAT_MSG_WHISPER, cmd.str(), bot);
+                botAI->HandleCommand(CHAT_MSG_WHISPER, cmd.str(), bot, CommandOrigin::Internal);
             }
             return true;
         }

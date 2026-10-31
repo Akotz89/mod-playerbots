@@ -22,6 +22,7 @@
 #include "MapMgr.h"
 #include "NewRpgInfo.h"
 #include "NewRpgStrategy.h"
+#include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "PerfMonitor.h"
 #include "Player.h"
@@ -2464,8 +2465,7 @@ bool RandomPlayerbotMgr::PopulationRequestSession(uint32 characterGuid)
     }
     if (auto loading = botLoading.find(guid); loading != botLoading.end())
         return loading->second == 0 && currentBots.contains(characterGuid);
-    // Reuse the native asynchronous login primitive; the provider acknowledges
-    // only after the request is actually queued.
+    // Reuse the native asynchronous login primitive; acknowledge only after it queues.
     AddPlayerBot(guid, 0);
     if (!botLoading.contains(guid))
         return false;

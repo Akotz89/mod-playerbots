@@ -1,3 +1,4 @@
+#include "PartyReactiveClaims.h"
 /*
  * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
  * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
@@ -291,6 +292,11 @@ bool LootObject::IsLootPossible(Player* bot)
     {
         return false;
     }
+    Player* master = botAI->GetMaster();
+    bool controlled = master && !GET_PLAYERBOT_AI(master) && master->GetGroup() && bot->GetGroup() == master->GetGroup();
+    if (!PartyReactiveClaims::Allowed(bot->GetGUID().GetRawValue(), guid.GetRawValue(), bot->GetMapId(), bot->GetInstanceId(), controlled))
+        return false;
+
     if (reqItem && !bot->HasItemCount(reqItem, 1))
         return false;
 

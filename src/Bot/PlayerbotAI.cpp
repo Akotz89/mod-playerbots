@@ -30,6 +30,7 @@
 #include "MoveSplineInit.h"
 #include "NewRpgStrategy.h"
 #include "ObjectGuid.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PerfMonitor.h"
 #include "Player.h"
@@ -41,6 +42,7 @@
 #include "PositionValue.h"
 #include "RBAC.h"
 #include "RandomPlayerbotMgr.h"
+#include "Random.h"
 #include "SayAction.h"
 #include "ScriptMgr.h"
 #include "ServerFacade.h"
@@ -48,6 +50,7 @@
 #include "SocialMgr.h"
 #include "SpellAuraEffects.h"
 #include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Transport.h"
 #include "Unit.h"
 #include "UpdateTime.h"
@@ -86,6 +89,13 @@ uint32 PlayerbotChatHandler::extractQuestId(std::string const str)
     return cId ? atol(cId) : 0;
 }
 
+ChatCommandHolder::ChatCommandHolder(std::string const command, Player* owner, uint32 type, time_t time,
+                                     CommandOrigin origin, uint64 admittedHumanOwner)
+    : command(command), ownerGuid(owner ? owner->GetGUID().GetRawValue() : 0), type(type), time(time), origin(origin),
+      admittedHumanOwner(admittedHumanOwner)
+{
+}
+
 void PacketHandlingHelper::AddHandler(uint16 opcode, std::string const handler) { handlers[opcode] = handler; }
 
 void PacketHandlingHelper::Handle(ExternalEventHelper& helper)
@@ -120,7 +130,8 @@ PlayerbotAI::PlayerbotAI()
       currentState(BOT_STATE_NON_COMBAT),
       chatHelper(this),
       chatFilter(this),
-      security(nullptr)
+      security(nullptr),
+      decisionControl((uint64(urand(1, std::numeric_limits<uint32>::max())) << 32) | rand32())
 {
     for (uint8 i = 0; i < BOT_STATE_MAX; i++)
         engines[i] = nullptr;
@@ -139,7 +150,8 @@ PlayerbotAI::PlayerbotAI(Player* bot)
       master(nullptr),
       chatHelper(this),
       chatFilter(this),
-      security(bot)  // reorder args - whipowill
+      security(bot),  // reorder args - whipowill
+      decisionControl((uint64(urand(1, std::numeric_limits<uint32>::max())) << 32) | rand32())
 {
     if (!bot->isTaxiCheater() && HasCheat((BotCheatMask::taxi)))
         bot->SetTaxiCheater(true);
@@ -446,7 +458,7 @@ void PlayerbotAI::UpdateAIGroupMaster()
         Player* newMaster = FindNewMaster();
         if (newMaster)
         {
-            master = newMaster;
+            SetMaster(newMaster);
             botAI->SetMaster(newMaster);
             botAI->ResetStrategies();
 
@@ -570,8 +582,8 @@ void PlayerbotAI::HandleCommands()
             continue;
         }
 
-        Player* owner = it->GetOwner();
-        if (!owner)
+        Player* owner = ObjectAccessor::FindConnectedPlayer(ObjectGuid(it->GetOwnerGuid()));
+        if (!IsValidPlayer(owner))
         {
             it = chatCommands.erase(it);
             continue;
@@ -584,7 +596,8 @@ void PlayerbotAI::HandleCommands()
             continue;
         }
 
-        if (!helper.ParseChatCommand(command, owner) && it->GetType() == CHAT_MSG_WHISPER)
+        if (!helper.ParseChatCommand(command, owner, it->GetOrigin(), it->GetAdmittedHumanOwner()) &&
+            it->GetType() == CHAT_MSG_WHISPER)
         {
             // ostringstream out; out << "Unknown command " << command;
             // TellPlayer(out);
@@ -595,8 +608,408 @@ void PlayerbotAI::HandleCommands()
     }
 }
 
+void PlayerbotAI::SetMaster(Player* newMaster)
+{
+    if (master != newMaster)
+    {
+        decisionControl.Invalidate();
+        admittedDecision.reset();
+        decisionHealDispatch.reset();
+    }
+    master = newMaster;
+}
+
+bool PlayerbotAI::ReadDecisionContext(Player* requester, DecisionControl::Context& context)
+{
+    if (requester != master || !IsValidPlayer(requester) || !IsValidPlayer(bot) || GET_PLAYERBOT_AI(bot) != this ||
+        requester->GetSession()->isLogingOut() || bot->GetSession()->isLogingOut() ||
+        !security.CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, false, requester) ||
+        !bot->GetGroup() || bot->GetGroup() != requester->GetGroup() || bot->GetMapId() != requester->GetMapId() ||
+        bot->GetInstanceId() != requester->GetInstanceId())
+        return false;
+
+    context = {requester->GetGUID().GetRawValue(), bot->GetGUID().GetRawValue(),
+               bot->GetGroup()->GetGUID().GetRawValue(), requester->GetTarget().GetRawValue(),
+               bot->GetMapId(), bot->GetInstanceId()};
+    return true;
+}
+
+bool PlayerbotAI::ReadDecisionMode(Player* requester, uint64 expectedBotGuid, DecisionModeStatus& out)
+{
+    out = {};
+    DecisionControl::Context context;
+    if (!expectedBotGuid || !ReadDecisionContext(requester, context) || context.bot != expectedBotGuid ||
+        !decisionControl.Available())
+        return false;
+    out = {context.bot, decisionControl.lifetime, decisionControl.revision, decisionControl.automatic};
+    return true;
+}
+
+PlayerbotAI::DecisionModeResult PlayerbotAI::SetDecisionMode(Player* requester, uint64 expectedBotGuid,
+    uint64 expectedLifetime, uint64 expectedRevision, bool automatic, DecisionModeStatus& out)
+{
+    out = {};
+    DecisionControl::Context context;
+    if (!expectedBotGuid || !ReadDecisionContext(requester, context) || context.bot != expectedBotGuid)
+        return DecisionModeResult::Denied;
+    if (!expectedLifetime || !expectedRevision || expectedLifetime != decisionControl.lifetime ||
+        expectedRevision != decisionControl.revision)
+        return DecisionModeResult::Stale;
+    if (!decisionControl.CanSetMode())
+        return DecisionModeResult::Exhausted;
+    decisionControl.SetMode(automatic);
+    admittedDecision.reset();
+    decisionHealDispatch.reset();
+    out = {context.bot, decisionControl.lifetime, decisionControl.revision, decisionControl.automatic};
+    return DecisionModeResult::Ok;
+}
+
+bool PlayerbotAI::ReadDecisionTargetContext(Player* requester, DecisionControl::Operation operation,
+    uint64 target, bool requireFocus, DecisionControl::Context& context)
+{
+    if (!ReadDecisionContext(requester, context) ||
+        (operation != DecisionControl::Operation::Attack && operation != DecisionControl::Operation::Heal2050))
+        return false;
+    context.operation = operation;
+    context.target = target;
+    context.requireFocus = requireFocus;
+    context.focus = requireFocus ? requester->GetTarget().GetRawValue() : 0;
+    context.ownerSession = requester->GetSession()->GetPartySessionIncarnation();
+    context.botSession = bot->GetSession()->GetPartySessionIncarnation();
+    Unit* unit = GetUnit(ObjectGuid(target));
+    Player* recipient = unit ? unit->ToPlayer() : nullptr;
+    context.targetSession = IsValidPlayer(recipient) ? recipient->GetSession()->GetPartySessionIncarnation() : 0;
+    return true;
+}
+
+PlayerbotAI::DecisionObservation PlayerbotAI::ObserveDecisionTarget(Player* requester,
+    DecisionControl::Operation operation, uint64 target, bool requireFocus)
+{
+    DecisionObservation out;
+    DecisionControl::Context context;
+    if (!ReadDecisionTargetContext(requester, operation, target, requireFocus, context)) return out;
+    out.ticket = decisionControl.Observe(context, DecisionControl::Clock::now());
+    out.automatic = decisionControl.automatic;
+    Unit* unit = GetUnit(ObjectGuid(target));
+    Player* recipient = unit ? unit->ToPlayer() : nullptr;
+    out.heal2050Learned = bot->HasSpell(2050);
+    out.casterHealth = bot->GetHealth(); out.casterMaxHealth = bot->GetMaxHealth();
+    out.mana = bot->GetPower(POWER_MANA); out.maxMana = bot->GetMaxPower(POWER_MANA);
+    if (IsValidUnit(unit)) { out.targetHealth = unit->GetHealth(); out.targetMaxHealth = unit->GetMaxHealth(); }
+    out.eligible = bot->IsAlive() && requester->IsAlive() && (operation == DecisionControl::Operation::Heal2050 ?
+        IsDecisionHealTarget(recipient) : (target && target == context.focus && IsValidUnit(unit) && unit->IsAlive() &&
+        unit->GetMapId() == bot->GetMapId() && unit->GetInstanceId() == bot->GetInstanceId() && bot->IsValidAttackTarget(unit)));
+    return out;
+}
+
+PlayerbotAI::DecisionObservation PlayerbotAI::ObserveDecision(Player* requester,
+    DecisionControl::Operation operation, uint64 target)
+{
+    return ObserveDecisionTarget(requester, operation, target, operation == DecisionControl::Operation::Attack);
+}
+
+PlayerbotAI::DecisionResult PlayerbotAI::SubmitDecision(Player* requester, DecisionControl::Ticket const& ticket,
+    DecisionChoice choice, std::function<bool()> const& authorize)
+{
+    DecisionResult out;
+    out.reason = "ticket";
+    DecisionControl::Context context;
+    if ((choice != DecisionChoice::Wait && choice != DecisionChoice::Execute) || (authorize && !authorize()) ||
+        !ReadDecisionTargetContext(requester, ticket.context.operation, ticket.context.target,
+                                   ticket.context.requireFocus, context)) return out;
+    if (choice == DecisionChoice::Execute)
+    {
+        Unit* unit = GetUnit(ObjectGuid(context.target));
+        bool legal = bot->IsAlive() && requester->IsAlive() &&
+            (context.operation == DecisionControl::Operation::Heal2050 ? IsDecisionHealTarget(unit ? unit->ToPlayer() : nullptr) :
+             (context.target == context.focus && IsValidUnit(unit) && unit->IsAlive() &&
+              unit->GetMapId() == bot->GetMapId() && unit->GetInstanceId() == bot->GetInstanceId() && bot->IsValidAttackTarget(unit)));
+        if (!legal) { out.reason = "target"; return out; }
+    }
+    auto admission = decisionControl.Consume(ticket.lifetime, ticket.revision, ticket.snapshot,
+                                              ticket.context.target, context, DecisionControl::Clock::now());
+    if (!admission) return out;
+    out.admitted = true;
+    if (choice == DecisionChoice::Wait) { out.reason = "wait"; return out; }
+    out.reason = "not_executed";
+    if (context.operation == DecisionControl::Operation::Heal2050)
+    {
+        auto dispatch = std::make_shared<DecisionHealDispatch>();
+        dispatch->admission = admission;
+        dispatch->authorize = authorize;
+        // The receipt outlives dispatch; cleanup never dereferences an AI after native callbacks.
+        struct ResetAdmission
+        {
+            std::shared_ptr<DecisionHealDispatch> dispatch;
+            ~ResetAdmission() { dispatch->admission.reset(); }
+        } reset{dispatch};
+        decisionHealDispatch = dispatch;
+        DoSpecificAction("decision heal", Event("decision heal", ObjectGuid(context.target)), true);
+        if (dispatch->result)
+        {
+            out.castResult = static_cast<uint32>(*dispatch->result);
+            out.native = *dispatch->result == SPELL_CAST_OK;
+            out.reason = out.native ? "prepare_ok" : "cast_failed";
+        }
+    }
+    else
+    {
+        auto previousAuthorization = std::move(decisionAuthorization);
+        decisionAuthorization = authorize;
+        struct Reset
+        {
+            PlayerbotAI* ai;
+            std::function<bool()> previous;
+            std::optional<bool> previousResult;
+            ~Reset()
+            {
+                ai->admittedDecision.reset();
+                ai->decisionAuthorization = std::move(previous);
+                ai->decisionAttackResult = previousResult;
+            }
+        } reset{this, std::move(previousAuthorization), decisionAttackResult};
+        admittedDecision = admission;
+        decisionAttackResult.reset();
+        DoSpecificAction("decision attack", Event("decision attack", ObjectGuid(context.target)), true);
+        out.native = decisionAttackResult.value_or(false);
+        if (decisionAttackResult) out.reason = out.native ? "native_ok" : "native_failed";
+    }
+    return out;
+}
+
+bool PlayerbotAI::TakeDecisionAttack(ObjectGuid target)
+{
+    auto admission = admittedDecision;
+    admittedDecision.reset();
+    DecisionControl::Context context;
+    Unit* unit = GetUnit(target);
+    return admission && admission->context.operation == DecisionControl::Operation::Attack &&
+           target.GetRawValue() == admission->context.target &&
+           ReadDecisionTargetContext(master, admission->context.operation, admission->context.target,
+                                     admission->context.requireFocus, context) &&
+           context.target == context.focus && bot->IsAlive() && master->IsAlive() && IsValidUnit(unit) && unit->IsAlive() &&
+           unit->GetMapId() == bot->GetMapId() && unit->GetInstanceId() == bot->GetInstanceId() && bot->IsValidAttackTarget(unit) &&
+           decisionControl.Current(*admission, context, DecisionControl::Clock::now()) &&
+           (!decisionAuthorization || decisionAuthorization());
+}
+
+bool PlayerbotAI::IsDecisionHealTarget(Player* target)
+{
+    return IsValidPlayer(bot) && bot->IsAlive() && bot->HasSpell(2050) && !bot->IsInCombat() &&
+           bot->getStandState() == UNIT_STAND_STATE_STAND && !bot->isMoving() &&
+           !bot->IsNonMeleeSpellCast(true, false, false, false, false) &&
+           IsValidPlayer(target) && !target->GetSession()->isLogingOut() && target->IsAlive() &&
+           !target->IsInCombat() &&
+           target->GetGroup() == bot->GetGroup() && bot->GetGroup() && bot->IsFriendlyTo(target) &&
+           target->GetMapId() == bot->GetMapId() && target->GetInstanceId() == bot->GetInstanceId() &&
+           target->GetHealth() < target->GetMaxHealth();
+}
+
+std::shared_ptr<PlayerbotAI::DecisionHealDispatch> PlayerbotAI::TakeDecisionHeal(ObjectGuid target)
+{
+    auto dispatch = std::move(decisionHealDispatch);
+    if (!dispatch)
+        return nullptr;
+    auto admission = dispatch->admission;
+    dispatch->admission.reset();
+    DecisionControl::Context context;
+    if (!admission || admission->context.operation != DecisionControl::Operation::Heal2050 ||
+        target.GetRawValue() != admission->context.target ||
+        !ReadDecisionTargetContext(master, admission->context.operation, admission->context.target,
+                                   admission->context.requireFocus, context) ||
+        !bot->IsAlive() || !master->IsAlive() || !IsDecisionHealTarget(GetUnit(target) ? GetUnit(target)->ToPlayer() : nullptr))
+        return nullptr;
+    context.operation = DecisionControl::Operation::Heal2050;
+    return decisionControl.Current(*admission, context, DecisionControl::Clock::now()) &&
+           (!dispatch->authorize || dispatch->authorize()) ? dispatch : nullptr;
+}
+
+bool PlayerbotAI::InvalidateDecisionForHuman(uint64 admittedHumanOwner)
+{
+    if (!admittedHumanOwner)
+        return true;
+
+    Player* issuer = ObjectAccessor::FindConnectedPlayer(ObjectGuid(admittedHumanOwner));
+    if (!IsValidPlayer(bot) || GET_PLAYERBOT_AI(bot) != this || !IsValidPlayer(issuer) ||
+        issuer->GetSession()->isLogingOut() ||
+        !security.CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, false, issuer))
+        return false;
+
+    decisionControl.Invalidate();
+    admittedDecision.reset();
+    decisionHealDispatch.reset();
+    return true;
+}
+
+bool PlayerbotAI::HandleDecisionCommand(std::string const& command, Player* requester, CommandOrigin origin,
+                                      uint64& admittedHumanOwner)
+{
+    bool decisionCommand = command == "decision" || command.rfind("decision ", 0) == 0;
+    if (!decisionCommand)
+    {
+        // Only explicit decision mode commands change mode; ordinary human mutations revoke pending tickets.
+        if (origin == CommandOrigin::Human && requester && command != "help" &&
+            command != "who" && command != "pvp stats" && command != "rpg status" &&
+            security.CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, false, requester))
+        {
+            admittedHumanOwner = requester->GetGUID().GetRawValue();
+            InvalidateDecisionForHuman(admittedHumanOwner);
+        }
+        return false;
+    }
+
+    ObjectGuid replyBot = bot->GetGUID();
+    ObjectGuid replyOwner = requester ? requester->GetGUID() : ObjectGuid::Empty;
+    auto reply = [replyBot, replyOwner](std::string const& response)
+    {
+        Player* sender = ObjectAccessor::FindConnectedPlayer(replyBot);
+        Player* receiver = ObjectAccessor::FindConnectedPlayer(replyOwner);
+        if (sender && receiver)
+            sender->Whisper(response, LANG_UNIVERSAL, receiver);
+    };
+    DecisionControl::Context context;
+    if (!ReadDecisionContext(requester, context))
+    {
+        reply("DECISION_V1 RESULT admitted=0 native=0 reason=owner_or_context");
+        return true;
+    }
+
+    if (command.size() > 256)
+    {
+        reply("DECISION_V1 RESULT admitted=0 native=0 reason=syntax");
+        return true;
+    }
+    std::istringstream input(command);
+    std::vector<std::string> words;
+    for (std::string word; input >> word;)
+        words.push_back(word);
+    if (words.size() == 3 && words[1] == "state" && words[2] == "heal")
+    {
+        context.operation = DecisionControl::Operation::Heal2050;
+        auto observation = ObserveDecisionTarget(requester, context.operation, context.target, true);
+        auto ticket = observation.ticket;
+        if (!ticket)
+        {
+            reply("DECISION_V1 RESULT admitted=0 native=0 reason=exhausted");
+            return true;
+        }
+        Unit* selected = GetUnit(ObjectGuid(context.target));
+        Player* recipient = selected ? selected->ToPlayer() : nullptr;
+        bool recipientValid = IsValidPlayer(recipient);
+        SpellInfo const* spell = sSpellMgr->GetSpellInfo(2050);
+        std::ostringstream out;
+        out << "DECISION_V1 SUPPORT lifetime=" << ticket->lifetime << " revision=" << ticket->revision
+            << " snapshot=" << ticket->snapshot << " mode=" << (decisionControl.automatic ? "auto" : "manual")
+            << " target=" << context.target << " master=" << context.master << " bot=" << context.bot
+            << " group=" << context.group << " map=" << context.map << " instance=" << context.instance
+            << " ttl_ms=500 operation=heal2050 spell=2050 learned=" << bot->HasSpell(2050)
+            << " caster_alive=" << bot->IsAlive() << " owner_alive=" << requester->IsAlive()
+            << " caster_combat=" << bot->IsInCombat()
+            << " caster_standing=" << (bot->getStandState() == UNIT_STAND_STATE_STAND)
+            << " caster_moving=" << bot->isMoving()
+            << " caster_busy=" << bot->IsNonMeleeSpellCast(true, false, false, false, false)
+            << " caster_health=" << bot->GetHealth() << " caster_max_health=" << bot->GetMaxHealth()
+            << " power_type=" << static_cast<uint32>(bot->getPowerType())
+            << " mana=" << bot->GetPower(POWER_MANA) << " max_mana=" << bot->GetMaxPower(POWER_MANA)
+            << " cheat_power=" << bot->GetCommandStatus(CHEAT_POWER)
+            << " cooldown=" << bot->HasSpellCooldown(2050) << " gcd=";
+        if (spell)
+            out << bot->GetGlobalCooldownMgr().HasGlobalCooldown(spell);
+        else
+            out << "unknown";
+        out << " cheat_local=" << static_cast<uint32>(GetCheat())
+            << " cheat_global=" << static_cast<uint32>(sPlayerbotAIConfig.botCheatMask)
+            << " target_player=" << (recipient != nullptr) << " target_valid=" << recipientValid;
+        if (recipientValid)
+            out << " target_alive=" << recipient->IsAlive() << " target_health=" << recipient->GetHealth()
+                << " target_max_health=" << recipient->GetMaxHealth()
+                << " target_party=" << (recipient->GetGroup() == bot->GetGroup())
+                << " target_friendly=" << bot->IsFriendlyTo(recipient)
+                << " target_combat=" << recipient->IsInCombat();
+        else
+            out << " target_alive=unknown target_health=unknown target_max_health=unknown"
+                << " target_party=unknown target_friendly=unknown target_combat=unknown";
+        if (IsValidUnit(selected) && selected->GetMapId() == bot->GetMapId() &&
+            selected->GetInstanceId() == bot->GetInstanceId())
+            out << " caster_phase=" << bot->GetPhaseMask() << " target_phase=" << selected->GetPhaseMask()
+                << " same_phase=" << bot->InSamePhase(selected) << " center_distance=" << bot->GetExactDist(selected)
+                << " los=" << bot->IsWithinLOSInMap(selected, VMAP::ModelIgnoreFlags::M2, LINEOFSIGHT_ALL_CHECKS);
+        else
+            out << " caster_phase=" << bot->GetPhaseMask()
+                << " target_phase=unknown same_phase=unknown center_distance=unknown los=unknown";
+        if (spell && spell->RangeEntry)
+            out << " base_min_range=" << spell->RangeEntry->RangeMin[1]
+                << " base_max_range=" << spell->RangeEntry->RangeMax[1];
+        else
+            out << " base_min_range=unknown base_max_range=unknown";
+        // Passive facts describe this ticket interval; only core preparation decides castability.
+        out << " effective_range=unknown effective_cost=unknown cast_time=unknown readiness=unknown";
+        reply(out.str());
+        return true;
+    }
+    if (words.size() == 2 && words[1] == "state")
+    {
+        auto observation = ObserveDecisionTarget(requester, context.operation, context.target, true);
+        auto ticket = observation.ticket;
+        if (!ticket)
+        {
+            reply("DECISION_V1 RESULT admitted=0 native=0 reason=exhausted");
+            return true;
+        }
+        std::ostringstream out;
+        out << "DECISION_V1 STATE lifetime=" << ticket->lifetime << " revision=" << ticket->revision
+            << " snapshot=" << ticket->snapshot << " mode=" << (decisionControl.automatic ? "auto" : "manual")
+            << " target=" << context.target << " master=" << context.master << " bot=" << context.bot
+            << " group=" << context.group << " map=" << context.map << " instance=" << context.instance
+            << " ttl_ms=500";
+        reply(out.str());
+        return true;
+    }
+    if (words.size() == 3 && words[1] == "mode" && (words[2] == "auto" || words[2] == "manual"))
+    {
+        DecisionModeStatus status;
+        if (SetDecisionMode(requester, context.bot, decisionControl.lifetime, decisionControl.revision,
+                            words[2] == "auto", status) != DecisionModeResult::Ok)
+        {
+            reply("DECISION_V1 RESULT admitted=0 native=0 reason=exhausted");
+            return true;
+        }
+        std::ostringstream out;
+        out << "DECISION_V1 MODE mode=" << (decisionControl.automatic ? "auto" : "manual")
+            << " lifetime=" << decisionControl.lifetime << " revision=" << decisionControl.revision;
+        reply(out.str());
+        return true;
+    }
+    uint64 lifetime = 0, revision = 0, snapshot = 0, target = 0;
+    if (words.size() != 6 || (words[1] != "engage" && words[1] != "heal") ||
+        !DecisionControl::ParseInteger(words[2], lifetime) ||
+        !DecisionControl::ParseInteger(words[3], revision) || !DecisionControl::ParseInteger(words[4], snapshot) ||
+        !DecisionControl::ParseInteger(words[5], target))
+    {
+        reply("DECISION_V1 RESULT admitted=0 native=0 reason=syntax");
+        return true;
+    }
+    auto operation = words[1] == "heal" ? DecisionControl::Operation::Heal2050 : DecisionControl::Operation::Attack;
+    auto ticket = decisionControl.Find(lifetime, revision, snapshot, target, operation);
+    DecisionResult result;
+    result.reason = "ticket";
+    if (ticket) result = SubmitDecision(requester, *ticket, DecisionChoice::Execute);
+    std::ostringstream out;
+    out << "DECISION_V1 RESULT admitted=" << result.admitted << " native=" << result.native << " reason=" << result.reason;
+    if (result.castResult) out << " cast_result=" << *result.castResult;
+    if (operation == DecisionControl::Operation::Heal2050)
+    {
+        out << " operation=heal2050";
+        if (result.admitted) out << " effect=unknown lifetime=" << lifetime << " revision=" << revision
+                                 << " snapshot=" << snapshot << " target=" << target;
+    }
+    reply(out.str());
+    return true;
+}
+
 std::map<std::string, ChatMsg> chatMap;
-void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang)
+void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang,
+                               CommandOrigin origin)
 {
     if (!bot)
         return;
@@ -624,7 +1037,7 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
         split(commands, filtered, sPlayerbotAIConfig.commandSeparator.c_str());
         for (std::vector<std::string>::iterator i = commands.begin(); i != commands.end(); ++i)
         {
-            HandleCommand(type, *i, fromPlayer);
+            HandleCommand(type, *i, fromPlayer, lang, origin);
         }
         return;
     }
@@ -675,10 +1088,14 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
                                       &fromPlayer))
         return;
 
+    uint64 admittedHumanOwner = 0;
+    if (HandleDecisionCommand(filtered, &fromPlayer, origin, admittedHumanOwner))
+        return;
+
     if (type == CHAT_MSG_RAID_WARNING && filtered.find(bot->GetName()) != std::string::npos &&
         filtered.find("award") == std::string::npos)
     {
-        chatCommands.push_back(ChatCommandHolder("warning", &fromPlayer, type));
+        chatCommands.push_back(ChatCommandHolder("warning", &fromPlayer, type, 0, origin, admittedHumanOwner));
         return;
     }
 
@@ -686,6 +1103,7 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
         (filtered.size() > 3 && filtered.substr(0, 3) == "do "))
     {
         Event event("do", "", &fromPlayer);
+        event.SetCommandOrigin(origin, admittedHumanOwner);
         std::string action = filtered.substr(filtered.find(" ") + 1);
         DoSpecificAction(action, event);
     }
@@ -693,6 +1111,7 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
     if (ChatHelper::parseValue("command", filtered).substr(0, 3) == "do ")
     {
         Event event("do", "", &fromPlayer);
+        event.SetCommandOrigin(origin, admittedHumanOwner);
         std::string action = ChatHelper::parseValue("command", filtered);
         action = action.substr(3);
         DoSpecificAction(action, event);
@@ -716,7 +1135,8 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
             }
         }
 
-        chatCommands.push_back(ChatCommandHolder(remaining, &fromPlayer, type, time(0) + index));
+        chatCommands.push_back(ChatCommandHolder(remaining, &fromPlayer, type, time(0) + index, origin,
+                                                  admittedHumanOwner));
     }
     else if (filtered == "reset")
     {
@@ -766,7 +1186,7 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
 
     else
     {
-        chatCommands.push_back(ChatCommandHolder(filtered, &fromPlayer, type));
+        chatCommands.push_back(ChatCommandHolder(filtered, &fromPlayer, type, 0, origin, admittedHumanOwner));
     }
 }
 
@@ -852,6 +1272,9 @@ void PlayerbotAI::HandleTeleportAck()
 
 void PlayerbotAI::Reset(bool full)
 {
+    decisionControl.Invalidate();
+    admittedDecision.reset();
+    decisionHealDispatch.reset();
     if (bot->HasUnitState(UNIT_STATE_IN_FLIGHT))
         return;
 
@@ -947,9 +1370,10 @@ bool PlayerbotAI::IsAllowedCommand(std::string const text)
     return false;
 }
 
-void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fromPlayer)
+void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fromPlayer, CommandOrigin origin)
 {
-    if (!GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, type != CHAT_MSG_WHISPER, fromPlayer))
+    if (!bot || !fromPlayer ||
+        !GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, type != CHAT_MSG_WHISPER, fromPlayer))
         return;
 
     if (type == CHAT_MSG_ADDON)
@@ -964,7 +1388,7 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fro
         split(commands, text, sPlayerbotAIConfig.commandSeparator.c_str());
         for (std::vector<std::string>::iterator i = commands.begin(); i != commands.end(); ++i)
         {
-            HandleCommand(type, *i, fromPlayer);
+            HandleCommand(type, *i, fromPlayer, origin);
         }
 
         return;
@@ -1016,10 +1440,14 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fro
         (!GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, type != CHAT_MSG_WHISPER, fromPlayer)))
         return;
 
+    uint64 admittedHumanOwner = 0;
+    if (HandleDecisionCommand(filtered, fromPlayer, origin, admittedHumanOwner))
+        return;
+
     if (type == CHAT_MSG_RAID_WARNING && filtered.find(bot->GetName()) != std::string::npos &&
         filtered.find("award") == std::string::npos)
     {
-        chatCommands.push_back(ChatCommandHolder("warning", fromPlayer, type));
+        chatCommands.push_back(ChatCommandHolder("warning", fromPlayer, type, 0, origin, admittedHumanOwner));
         return;
     }
 
@@ -1027,7 +1455,9 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fro
         (filtered.size() > 3 && filtered.substr(0, 3) == "do "))
     {
         std::string const action = filtered.substr(filtered.find(" ") + 1);
-        DoSpecificAction(action);
+        Event event;
+        event.SetCommandOrigin(origin, admittedHumanOwner);
+        DoSpecificAction(action, event);
     }
     else if (type != CHAT_MSG_WHISPER && filtered.size() > 6 && filtered.substr(0, 6) == "queue ")
     {
@@ -1048,7 +1478,8 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fro
             }
         }
 
-        chatCommands.push_back(ChatCommandHolder(remaining, fromPlayer, type, time(nullptr) + index));
+        chatCommands.push_back(ChatCommandHolder(remaining, fromPlayer, type, time(nullptr) + index, origin,
+                                                  admittedHumanOwner));
     }
     else if (filtered == "reset")
     {
@@ -1111,7 +1542,7 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fro
     }
     else
     {
-        chatCommands.push_back(ChatCommandHolder(filtered, fromPlayer, type));
+        chatCommands.push_back(ChatCommandHolder(filtered, fromPlayer, type, 0, origin, admittedHumanOwner));
     }
 }
 
