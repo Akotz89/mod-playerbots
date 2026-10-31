@@ -66,10 +66,6 @@ AiObjectContext* AiFactory::createAiObjectContext(Player* player, PlayerbotAI* b
 
 uint8 AiFactory::GetPlayerSpecTab(Player* bot)
 {
-    int32 const namedPartyTab = sPlayerbotAIConfig.GetNamedPartySpecTab(bot);
-    if (namedPartyTab >= 0)
-        return static_cast<uint8>(namedPartyTab);
-
     std::map<uint8, uint32> tabs = GetPlayerSpecTabs(bot);
 
     if (bot->GetLevel() >= 10 && ((tabs[0] + tabs[1] + tabs[2]) > 0))

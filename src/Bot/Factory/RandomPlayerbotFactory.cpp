@@ -74,17 +74,22 @@ uint32 RandomPlayerbotFactory::EnsureManifestBot(uint32 accountId, ManifestChara
         spec.cls == CLASS_DEATH_KNIGHT)
         return 0;
 
-    if (QueryResult existing = CharacterDatabase.Query(
-            "SELECT guid, account, race, class, level, gender, skin, face, hairStyle, hairColor, facialStyle "
-            "FROM characters WHERE name = '{}'", spec.name))
+    QueryResult existing = CharacterDatabase.Query(
+            "SELECT 1, guid, account, race, class, level, gender, skin, face, hairStyle, hairColor, facialStyle "
+            "FROM characters WHERE name = '{}' UNION ALL "
+            "SELECT 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 WHERE NOT EXISTS "
+            "(SELECT 1 FROM characters WHERE name = '{}')", spec.name, spec.name);
+    if (!existing)
+        return 0;
+    Field* fields = existing->Fetch();
+    if (fields[0].Get<uint32>() != 0)
     {
-        Field* fields = existing->Fetch();
-        bool exact = fields[1].Get<uint32>() == accountId && fields[2].Get<uint8>() == spec.race &&
-                     fields[3].Get<uint8>() == spec.cls && fields[4].Get<uint8>() == 1 &&
-                     fields[5].Get<uint8>() == spec.gender && fields[6].Get<uint8>() == spec.skin &&
-                     fields[7].Get<uint8>() == spec.face && fields[8].Get<uint8>() == spec.hairStyle &&
-                     fields[9].Get<uint8>() == spec.hairColor && fields[10].Get<uint8>() == spec.facialHair;
-        return exact ? fields[0].Get<uint32>() : 0;
+        bool exact = fields[2].Get<uint32>() == accountId && fields[3].Get<uint8>() == spec.race &&
+                     fields[4].Get<uint8>() == spec.cls && fields[5].Get<uint8>() == 1 &&
+                     fields[6].Get<uint8>() == spec.gender && fields[7].Get<uint8>() == spec.skin &&
+                     fields[8].Get<uint8>() == spec.face && fields[9].Get<uint8>() == spec.hairStyle &&
+                     fields[10].Get<uint8>() == spec.hairColor && fields[11].Get<uint8>() == spec.facialHair;
+        return exact ? fields[1].Get<uint32>() : 0;
     }
 
     WorldSession session(accountId, "", 0x0, nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING,

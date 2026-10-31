@@ -353,9 +353,10 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
         if (!botAI)
             return;
 
-        // Queue group cleanup operation for world thread
-        auto cleanupOp = std::make_unique<BotLogoutGroupCleanupOperation>(guid);
-        PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(cleanupOp));
+        // Capture settings before logout destroys the player and AI.
+        Group* group = bot->GetGroup();
+        if (group && !bot->InBattleground() && !bot->InBattlegroundQueue() && IsRealPlayer(botAI->GetMaster()))
+            PlayerbotRepository::instance().Save(botAI);
 
         LOG_DEBUG("playerbots", "Bot {} logging out", bot->GetName().c_str());
 
@@ -517,22 +518,6 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     }
 
     group = bot->GetGroup();
-
-    if (sPlayerbotAIConfig.IsNamedPartyMember(bot))
-    {
-        PlayerbotFactory factory(bot, bot->GetLevel());
-        if (sPlayerbotAIConfig.namedPartyAutoTalents && bot->GetFreeTalentPoints() > 0)
-        {
-            int32 const specNo = sPlayerbotAIConfig.GetNamedPartySpecNo(bot);
-            if (specNo >= 0)
-                PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
-        }
-        if (sPlayerbotAIConfig.namedPartyAutoLearnTrainerSpells)
-            factory.InitAvailableClassSpells();
-        if (sPlayerbotAIConfig.namedPartyAutoLearnClassQuestSpells)
-            factory.InitClassSpells();
-    }
-
     if (group)
     {
         botAI->ResetStrategies();
@@ -541,22 +526,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     {
         botAI->ResetStrategies(!sRandomPlayerbotMgr.IsRandomBot(bot));
     }
-    bool const namedPartyBot = sPlayerbotAIConfig.IsNamedPartyMember(bot);
-    if (!namedPartyBot)
-    {
-        PlayerbotRepository::instance().Load(botAI);
-    }
-    else
-    {
-        FormationValue* formation =
-            static_cast<FormationValue*>(botAI->GetAiObjectContext()->GetValue<Formation*>("formation"));
-        formation->Load(sPlayerbotAIConfig.namedPartyFormation);
-        if (!sPlayerbotAIConfig.namedPartyAutonomousPull)
-        {
-            botAI->ChangeStrategy("-pull,-pull back", BOT_STATE_COMBAT);
-            botAI->ChangeStrategy("-pull,-pull back", BOT_STATE_NON_COMBAT);
-        }
-    }
+    PlayerbotRepository::instance().Load(botAI);
 
     if (master && !master->HasUnitState(UNIT_STATE_IN_FLIGHT))
     {
@@ -570,15 +540,11 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     // set delay on login
     botAI->SetNextCheckDelay(urand(2000, 4000));
 
-    if (!sPlayerbotAIConfig.IsNamedPartyMember(bot) || !sPlayerbotAIConfig.namedPartyQuiet)
-    {
-        botAI->TellMaster(PlayerbotTextMgr::instance().GetBotTextOrDefault(
-            "hello", "Hello!", {}), PLAYERBOT_SECURITY_TALK);
-    }
+    botAI->TellMaster(PlayerbotTextMgr::instance().GetBotTextOrDefault(
+        "hello", "Hello!", {}), PLAYERBOT_SECURITY_TALK);
 
     // Queue group operations for world thread
-    bool const restoreGroup = !namedPartyBot || sPlayerbotAIConfig.namedPartyRestoreGroup;
-    if (restoreGroup && master && master->GetGroup() && !group)
+    if (master && master->GetGroup() && !group)
     {
         Group* mgroup = master->GetGroup();
         if (mgroup->GetMembersCount() >= 5)
@@ -602,7 +568,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
             PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
         }
     }
-    else if (restoreGroup && master && !group)
+    else if (master && !group)
     {
         // Queue group creation and AddMember operation
         auto inviteOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
@@ -1583,42 +1549,6 @@ void PlayerbotMgr::HandleMasterIncomingPacket(WorldPacket const& packet)
             botAI->HandleMasterIncomingPacket(packet);
     }
 
-    if (packet.GetOpcode() == CMSG_QUESTGIVER_ACCEPT_QUEST)
-    {
-        Player* master = GetMaster();
-        Group* group = master ? master->GetGroup() : nullptr;
-        if (master && group && group->GetLeaderGUID() == master->GetGUID())
-        {
-            WorldPacket questPacket(packet);
-            questPacket.rpos(0);
-
-            ObjectGuid questGiver;
-            uint32 questId = 0;
-            uint32 unk1 = 0;
-            questPacket >> questGiver >> questId >> unk1;
-            (void)unk1;
-
-            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-            if (quest && !questGiver.IsEmpty() && master->HasQuest(questId))
-            {
-                for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
-                {
-                    Player* bot = itr->GetSource();
-                    PlayerbotAI* botAI = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
-                    if (!bot || bot == master || !bot->IsInWorld() || !botAI || botAI->GetMaster() != master)
-                        continue;
-
-                    if (!bot->CanTakeQuest(quest, false) || !bot->CanAddQuest(quest, false))
-                        continue;
-
-                    // Share quest state only; normal quest completion and rewards still require gameplay.
-                    bot->AddQuest(quest, master);
-                    LOG_DEBUG("playerbots", "Auto-shared quest {} from {} to {}", questId, master->GetName(), bot->GetName());
-                }
-            }
-        }
-    }
-
     switch (packet.GetOpcode())
     {
         // if master is logging out, log out all bots
@@ -1730,33 +1660,10 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
     if (sPlayerbotAIConfig.selfBotLevel > 2)
         HandlePlayerbotCommand("self", player);
 
-    bool const namedPartyLogin = sPlayerbotAIConfig.namedPartyAutoLogin &&
-        sPlayerbotAIConfig.IsNamedPartyMaster(player);
-    if (!sPlayerbotAIConfig.botAutologin && !namedPartyLogin)
+    if (!sPlayerbotAIConfig.botAutologin)
         return;
 
     uint32 accountId = session->GetAccountId();
-    if (namedPartyLogin)
-    {
-        QueryResult results = CharacterDatabase.Query("SELECT guid, name FROM characters WHERE account = {}", accountId);
-        if (results)
-        {
-            do
-            {
-                Field* fields = results->Fetch();
-                std::string const characterName = fields[1].Get<std::string>();
-                bool const selected = std::any_of(
-                    sPlayerbotAIConfig.namedPartyMembers.begin(), sPlayerbotAIConfig.namedPartyMembers.end(),
-                    [&](std::string const& member) { return StringEqualI(member, characterName); });
-                if (!selected)
-                    continue;
-
-                AddPlayerBot(ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>()), accountId);
-            } while (results->NextRow());
-        }
-        return;
-    }
-
     QueryResult results = CharacterDatabase.Query("SELECT name FROM characters WHERE account = {}", accountId);
     if (results)
     {

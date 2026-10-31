@@ -106,6 +106,7 @@ public:
     bool Execute(Event event) override;
 
 protected:
+    bool DoAcquireQuest();
     bool DoIncompleteQuest(NewRpgInfo::DoQuest& data);
     bool DoCompletedQuest(NewRpgInfo::DoQuest& data);
 

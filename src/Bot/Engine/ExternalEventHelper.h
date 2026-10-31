@@ -8,6 +8,7 @@
 #define PLAYERBOTS_EXTERNALEVENTHELPER_H
 
 #include "Common.h"
+#include "Event.h"
 #include <map>
 
 class AiObjectContext;
@@ -19,9 +20,11 @@ class ExternalEventHelper
 public:
     ExternalEventHelper(AiObjectContext* aiObjectContext) : aiObjectContext(aiObjectContext) {}
 
-    bool ParseChatCommand(std::string const command, Player* owner = nullptr);
+    bool ParseChatCommand(std::string const command, Player* owner = nullptr,
+                          CommandOrigin origin = CommandOrigin::Internal, uint64 admittedHumanOwner = 0);
     void HandlePacket(std::map<uint16, std::string>& handlers, WorldPacket const& packet, Player* owner = nullptr);
-    bool HandleCommand(std::string const name, std::string const param, Player* owner = nullptr);
+    bool HandleCommand(std::string const name, std::string const param, Player* owner = nullptr,
+                       CommandOrigin origin = CommandOrigin::Internal, uint64 admittedHumanOwner = 0);
 
 private:
     AiObjectContext* aiObjectContext;

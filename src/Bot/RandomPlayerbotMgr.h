@@ -176,9 +176,12 @@ public:
     void AssignAccountTypes();
     bool IsAccountType(uint32 accountId, uint8 accountType);
 
+    // Narrow world-thread lifecycle seam for the Python population-v1 bridge.
+    // Policy and identity selection remain outside Playerbots; these methods
+    // only keep the existing event ledger and currentBots scheduler coherent.
     bool PopulationRequestSession(uint32 characterGuid);
-    bool PopulationReleaseSession(uint32 characterGuid);
     bool PopulationSessionExists(uint32 characterGuid) const;
+    bool PopulationReleaseSession(uint32 characterGuid);
 
 protected:
     void OnBotLoginInternal(Player* const bot) override;

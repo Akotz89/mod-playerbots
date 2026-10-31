@@ -64,6 +64,7 @@
 #include "NearestNpcsValue.h"
 #include "NewPlayerNearbyValue.h"
 #include "OutfitListValue.h"
+#include "OwnerLearningControl.h"
 #include "PartyMemberSnaredTargetValue.h"
 #include "PartyMemberToDispel.h"
 #include "PartyMemberToHeal.h"
@@ -171,6 +172,7 @@ public:
         creators["my attacker count"] = &ValueContext::my_attacker_count;
         creators["has aggro"] = &ValueContext::has_aggro;
         creators["mounted"] = &ValueContext::mounted;
+        creators["owner learning"] = &ValueContext::owner_learning_value;
         creators["custom_glyphs"] = &ValueContext::custom_glyphs;   // Added for custom glyphs
 
         creators["can loot"] = &ValueContext::can_loot;
@@ -588,6 +590,11 @@ private:
     static UntypedValue* can_fish(PlayerbotAI* botAI) { return new CanFishValue(botAI); }
     static UntypedValue* can_use_fishing_bobber(PlayerbotAI* botAI) { return new CanUseFishingBobberValue(botAI); }
     static UntypedValue* fishing_spot(PlayerbotAI* botAI) { return new FishingSpotValue(botAI); }
+    static UntypedValue* owner_learning_value(PlayerbotAI* botAI)
+    {
+        return new owner_learning::SavedValue(botAI);
+    }
+
     static UntypedValue* custom_glyphs(PlayerbotAI* botAI)
     {
         return new ManualSetValue<bool>(botAI, false, "custom_glyphs");

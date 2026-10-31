@@ -3,6 +3,7 @@
  * and/or modify it under version 3 of the License, or (at your option), any later version.
  */
 
+#include "Guide/CourtesyBuffs.h"
 #include "Playerbots.h"
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
@@ -20,6 +21,8 @@
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "cmath"
+
+void InitializeManagedPopulationProgression();
 
 class PlayerbotsDatabaseScript : public DatabaseScript
 {
@@ -160,6 +163,7 @@ public:
         if (botAI != nullptr)
         {
             botAI->UpdateAI(diff);
+            PlayerbotsCourtesy::TryBuff(player, botAI);
         }
 
         if (PlayerbotMgr* playerbotMgr = GET_PLAYERBOT_MGR(player))
@@ -367,6 +371,7 @@ public:
         LOG_INFO("server.loading", "Load Playerbots Config...");
 
         sPlayerbotAIConfig.Initialize();
+        InitializeManagedPopulationProgression();
 
         LOG_INFO("server.loading", ">> Loaded playerbots config in {} ms", GetMSTimeDiffToNow(oldMSTime));
         LOG_INFO("server.loading", " ");
@@ -459,6 +464,8 @@ public:
 
     void OnPlayerbotLogout(Player* player) override
     {
+        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
+            ai->TakeCourtesyBuff();
         if (PlayerbotMgr* playerbotMgr = GET_PLAYERBOT_MGR(player))
         {
             PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(player);

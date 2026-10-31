@@ -1140,65 +1140,87 @@ std::string const QuestTravelDestination::getTitle() { return ChatHelper::Format
 
 bool QuestRelationTravelDestination::isActive(Player* bot)
 {
+    if (!bot || !bot->GetSession()) return false;
+    ObjectGuid actorGuid = bot->GetGUID();
+    uint64 session = bot->GetSession()->GetPartySessionIncarnation();
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+    if (!botAI) return false;
     AiObjectContext* context = botAI->GetAiObjectContext();
-
-    if (botAI && !botAI->HasStrategy("rpg quest", BOT_STATE_NON_COMBAT))
-        return false;
-
-    if (relation == 0)
+    if (!context) return false;
+    uint32 id = questId;
+    Quest const* quest = questTemplate;
+    uint32 questRelation = relation;
+    int32 giverEntry = entry;
+    uint32 mapId = bot->GetMapId();
+    uint32 phaseMask = bot->GetPhaseMask();
+    auto current = [&]()
     {
-        if ((int32)questTemplate->GetQuestLevel() >= (int32)bot->GetLevel() + (int32)5)
-            return false;
+        return ObjectAccessor::FindPlayer(actorGuid) == bot && bot->IsInWorld() && bot->GetSession() &&
+            bot->GetSession()->GetPartySessionIncarnation() == session && !bot->GetSession()->isLogingOut() &&
+            GET_PLAYERBOT_AI(bot) == botAI && botAI->GetAiObjectContext() == context &&
+            (botAI->HasStrategy("rpg quest", BOT_STATE_NON_COMBAT) || botAI->HasStrategy("new rpg", BOT_STATE_NON_COMBAT)) &&
+            bot->GetMapId() == mapId && bot->GetPhaseMask() == phaseMask &&
+            sObjectMgr->GetQuestTemplate(id) == quest;
+    };
+    if (!quest || !current()) return false;
 
-        // skip for now this quest
-        if (getPoints().front()->GetMapId() != bot->GetMapId())
-            return false;
-
-        if (!bot->GetMap()->GetEntry()->IsWorldMap() || !bot->CanTakeQuest(questTemplate, false))
-            return false;
-
-        //uint32 dialogStatus = TravelMgr::instance().getDialogStatus(bot, entry, questTemplate); //not used, shadowed by the next declaration, line marked for removal.
-
-        if (AI_VALUE(bool, "can fight equal"))
+    // Copy route values before script-capable eligibility; do not retain native points across it.
+    auto points = getPoints();
+    if (points.empty() || !points.front()) return false;
+    uint32 pointMap = points.front()->GetMapId();
+    uint32 questType = quest->GetType();
+    bool overworld = true;
+    if (questRelation != 0 && (questType == QUEST_TYPE_ELITE || questType == QUEST_TYPE_DUNGEON))
+    {
+        WorldPosition pos(bot);
+        auto* point = nearestPoint(&pos);
+        if (!point) return false;
+        overworld = point->isOverworld();
+    }
+    if (questRelation == 0)
+    {
+        if ((int32)quest->GetQuestLevel() >= (int32)bot->GetLevel() + (int32)5 || pointMap != mapId ||
+            !bot->GetMap()->GetEntry()->IsWorldMap()) return false;
+        bool take = bot->CanTakeQuest(quest, false);
+        if (!current() || !take) return false;
+        bool equal = AI_VALUE(bool, "can fight equal");
+        if (!current()) return false;
+        if (equal)
         {
-            if (AI_VALUE(uint8, "free quest log slots") < 5)
-                return false;
-
-            //None has yellow exclamation mark.
-            if (!AI_VALUE2(bool, "group or", "following party,near leader,can accept quest npc::" + std::to_string(entry)))
-                if (!AI_VALUE2(bool, "group or", "following party,near leader,can accept quest low level npc::" + std::to_string(entry) + "need quest objective::" + std::to_string(questId))) //Noone can do this quest for a usefull reward.
-                    return false;
+            uint8 slots = AI_VALUE(uint8, "free quest log slots");
+            if (!current() || slots < 5) return false;
+            bool normal = AI_VALUE2(bool, "group or", "following party,near leader,can accept quest npc::" + std::to_string(giverEntry));
+            if (!current()) return false;
+            if (!normal)
+            {
+                bool low = AI_VALUE2(bool, "group or", "following party,near leader,can accept quest low level npc::" + std::to_string(giverEntry) + "need quest objective::" + std::to_string(id));
+                if (!current() || !low) return false;
+            }
         }
         else
         {
-            if (!AI_VALUE2(bool, "group or", "following party,near leader,can accept quest low level npc::" + std::to_string(entry))) //Noone can pick up this quest for money.
-                return false;
-
-            if (AI_VALUE(uint8, "free quest log slots") < 10)
-                return false;
+            bool low = AI_VALUE2(bool, "group or", "following party,near leader,can accept quest low level npc::" + std::to_string(giverEntry));
+            if (!current() || !low) return false;
+            uint8 slots = AI_VALUE(uint8, "free quest log slots");
+            if (!current() || slots < 10) return false;
         }
-
-        // Do not try to pick up dungeon/elite quests in instances without a group.
-        if ((questTemplate->GetType() == QUEST_TYPE_ELITE || questTemplate->GetType() == QUEST_TYPE_DUNGEON) &&
-            !AI_VALUE(bool, "can fight boss"))
-            return false;
+        if (questType == QUEST_TYPE_ELITE || questType == QUEST_TYPE_DUNGEON)
+        {
+            bool boss = AI_VALUE(bool, "can fight boss");
+            if (!current() || !boss) return false;
+        }
     }
     else
     {
-        if (!AI_VALUE2(bool, "group or", "following party,near leader,can turn in quest npc::" + std::to_string(entry)))
-            return false;
-
-        //Do not try to hand-in dungeon/elite quests in instances without a group.
-        if ((questTemplate->GetType() == QUEST_TYPE_ELITE || questTemplate->GetType() == QUEST_TYPE_DUNGEON) && !AI_VALUE(bool, "can fight boss"))
+        bool turnIn = AI_VALUE2(bool, "group or", "following party,near leader,can turn in quest npc::" + std::to_string(giverEntry));
+        if (!current() || !turnIn) return false;
+        if (questType == QUEST_TYPE_ELITE || questType == QUEST_TYPE_DUNGEON)
         {
-            WorldPosition pos(bot);
-            if (!this->nearestPoint(&pos)->isOverworld())
-                return false;
+            bool boss = AI_VALUE(bool, "can fight boss");
+            if (!current() || (!boss && !overworld)) return false;
         }
     }
-
-    return true;
+    return current();
 }
 
 std::string const QuestRelationTravelDestination::getTitle()

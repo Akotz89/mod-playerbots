@@ -110,6 +110,25 @@ AiPlayerbot.RandomBotAccountPrefix = "rndbot"
 # like to recreate randombots, set the number back to 0 and rerun the Worldserver.
 AiPlayerbot.DeleteRandomBotAccounts = 0
 
+# Preserve a generated-once randombot population as permanent characters.
+# Enable this only after the intended RNDBOT accounts and characters have been seeded.
+# When enabled, startup loads existing RNDBOT accounts without creating, replacing, or
+# deleting accounts/characters; periodic factory randomize/refresh and synthetic level-up
+# inventory/spell maintenance are suppressed. Login, AI activity, earned XP/loot, logout,
+# death/revive, and configured population teleports continue to operate. A non-empty
+# SealedIdentityFile below always enables this protection even if this legacy switch is 0.
+# Default: 0 (legacy factory maintenance remains enabled)
+AiPlayerbot.RandomBotPersistentProgression = 0
+
+# Seal an already-created RNDBOT population to an immutable identity manifest file.
+# The file contains tab-separated rows ordered by account ID and character GUID with:
+# account ID, username, character GUID, name, race, class, and gender. A sealed startup
+# loads matching accounts read-only and exits on any identity insertion, deletion, rename,
+# reaccounting, race/class/gender change, or duplicate. It never creates replacement bots.
+# Leave empty only while initially creating the population.
+# Default: "" (legacy factory creation/repair behavior)
+AiPlayerbot.RandomBotFactory.SealedIdentityFile = ""
+
 # Disable randombots when no real players are logged in
 # Default: 0 (randombots will login when server starts)
 # If enabled, randombots will only log in 30 seconds (default) after a real player logs in, and will
@@ -236,6 +255,11 @@ AiPlayerbot.ReviveBotWhenSummoned = 1
 # Default: 1 (enabled)
 AiPlayerbot.BotRepairWhenSummon = 1
 
+# Repair all bot durability for free when the bot releases its spirit.
+# Paid vendor repairs are unaffected when this is disabled.
+# Default: 0 (disabled)
+AiPlayerbot.FreeRepairOnRelease = 0
+
 #
 #
 ####################################################################################################
@@ -286,7 +310,7 @@ AiPlayerbot.AutoEquipUpgradeLoot = 1
 
 # Threshold for auto equipping upgrades
 # Default: 1.1 (Equip when the equipment score of the new item is 1.1 times higher than the currently equipped item)
-AiPlayerbot.EquipUpgradeThreshold = 1.1
+AiPlayerbot.EquipUpgradeThreshold = 1.0
 
 # Two rounds of equipment initialization to create more suitable gear
 AiPlayerbot.TwoRoundsGearInit = 0
@@ -305,22 +329,22 @@ AiPlayerbot.FreeMethodLoot = 0
 
 # Bots' Roll level bots will use for items they Need (0 = pass, 1 = greed, 2 = need)
 # Default: 1 (greed)
-AiPlayerbot.LootNeedRollLevel = 1
+AiPlayerbot.LootNeedRollLevel = 2
 
 # Enable bots to roll GREED on items (global toggle)
 # If disabled, bots will PASS instead of GREED on all items
 # Default: 0 (disabled - bots only NEED or PASS)
-AiPlayerbot.LootGreedRollLevel = 0
+AiPlayerbot.LootGreedRollLevel = 1
 
 # Enable bots to roll on recipes. Will NEED on learnable profession recipes they don't already know
 # Bots will roll GREED on BoE recipes they can't learn if LootRollGreed is enabled.
 # Default: 0 (disabled)
-AiPlayerbot.LootRollRecipe = 0
+AiPlayerbot.LootRollRecipe = 1
 
 # Bots with enchanting will roll DISENCHANT instead of GREED on disenchantable items
 # If disabled, bots will GREED on disenchantable items instead
 # Default: 0 (disabled)
-AiPlayerbot.LootRollDisenchant = 0
+AiPlayerbot.LootRollDisenchant = 1
 
 # A list of GameObject GUIDs that bots will not interact with.
 # List of default GUIDs:
@@ -631,7 +655,7 @@ AiPlayerbot.AutoGearScoreLimit = 0
 AiPlayerbot.BotCheats = "food,taxi,raid"
 
 # List of attunement quests (comma-separated list of quest IDs) that are automatically completed for all bots.
-# While mod-playerbots does not restore removed attunement requirements, other mods, such as mod-individual-progression, may do so.
+# While mod-playerbots does not restore removed attunement requirements, another optional content module may do so.
 # This is meant to exclude bots from such requirements.
 #
 # Defaults:
@@ -758,7 +782,10 @@ AiPlayerbot.PeriodicOnlineOfflineRatio = 2.0
 AiPlayerbot.RandomBotAllianceRatio = 50
 AiPlayerbot.RandomBotHordeRatio = 50
 
-# Disable logging in of death knight bots
+# Disable Death Knight bot creation and login. The selected Progression System
+# phase profile must set this explicitly: phase 1-19 uses 1, and a later phase
+# may use 0 only after its Death Knight policy is reviewed.
+# Default: 0 (disabled)
 AiPlayerbot.DisableDeathKnightLogin = 0
 
 # Enable simulated expansion limitation for talents and glyphs
@@ -2715,3 +2742,14 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
 
 # Allow bots to be summoned near innkeepers
 AiPlayerbot.SummonAtInnkeepersEnabled = 1
+
+# CPI-224 ambient courtesy buffs. Default off; enable only after combined acceptance.
+# All options must be present/valid when enabled. No rank/level/item grants.
+AiPlayerbot.Courtesy.Enable = 0
+AiPlayerbot.Courtesy.IntervalMs = 1000
+AiPlayerbot.Courtesy.ScanBudget = 16
+AiPlayerbot.Courtesy.GrantBudget = 4
+AiPlayerbot.Courtesy.TargetBudget = 16
+AiPlayerbot.Courtesy.Radius = 30
+AiPlayerbot.Courtesy.MinimumManaPercent = 35
+AiPlayerbot.Courtesy.TimeBudgetUs = 2000

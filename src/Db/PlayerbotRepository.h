@@ -8,6 +8,7 @@
 #define PLAYERBOTS_PLAYERBOTREPOSITORY_H
 
 #include "PlayerbotAI.h"
+#include "DatabaseEnvFwd.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -36,7 +37,7 @@ private:
     PlayerbotRepository(PlayerbotRepository&&) = delete;
     PlayerbotRepository& operator=(PlayerbotRepository&&) = delete;
 
-    void SaveValue(uint32_t guid, std::string const key, std::string const value);
+    void SaveValue(PlayerbotsDatabaseTransaction transaction, uint32_t guid, std::string const key, std::string const value);
     std::string const FormatStrategies(std::string const type, std::vector<std::string> strategies);
 };
 

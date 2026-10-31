@@ -37,6 +37,29 @@
 #include "TravelMgr.h"
 #include "G3D/Vector2.h"
 
+static bool QuestRewardActorCurrent(Player* player, PlayerbotAI* ai, ObjectGuid playerGuid, uint64 session)
+{
+    return ObjectAccessor::FindPlayer(playerGuid) == player && player->GetSession() &&
+        player->GetSession()->GetPartySessionIncarnation() == session && !player->GetSession()->isLogingOut() &&
+        GET_PLAYERBOT_AI(player) == ai;
+}
+
+static bool QuestRewardGoalCurrent(PlayerbotAI* ai, NewRpgInfo const& original)
+{
+    NewRpgInfo const& live = ai->rpgInfo;
+    if (live.pythonQuestGoal != original.pythonQuestGoal || live.pythonGoalRevision != original.pythonGoalRevision ||
+        live.pythonGoalGeneration != original.pythonGoalGeneration || live.pythonGoalSession != original.pythonGoalSession ||
+        live.pythonGoalAccountId != original.pythonGoalAccountId)
+        return false;
+    if (!original.pythonQuestGoal) return true;
+    auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&live.data);
+    auto const* expected = std::get_if<NewRpgInfo::DoQuest>(&original.data);
+    return goal && expected && goal->questId == expected->questId && goal->identityKey == expected->identityKey &&
+        goal->rewardKind == expected->rewardKind && goal->rewardIndex == expected->rewardIndex &&
+        goal->rewardItem == expected->rewardItem && goal->questTemplateToken == expected->questTemplateToken &&
+        goal->acquiring == expected->acquiring && goal->giverEntry == expected->giverEntry && goal->giverPosition == expected->giverPosition;
+}
+
 bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
 {
     if (dest == WorldPosition())
@@ -82,6 +105,25 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         }
     }
 
+    uint64 const observationRecord = botAI->rpgInfo.pythonAcquisitionRecord;
+    ObjectGuid observationGuid;
+    uint64 observationSession = 0;
+    if (observationRecord)
+    {
+        observationGuid = bot->GetGUID();
+        observationSession = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    }
+    auto observedDecision = [&](bool moved) noexcept
+    {
+        if (observationRecord)
+        {
+            if (QuestRewardActorCurrent(bot, botAI, observationGuid, observationSession) && botAI->rpgInfo.pythonAcquisitionRecord == observationRecord)
+                botAI->rpgInfo.ObserveQuestAcquisition(bot, "route_decision", dest, moved, 0, 0, 0, "MoveFarTo_final_decision");
+            else NewRpgInfo::InvalidateQuestAcquisitionRecord(observationRecord, "movement_owner_changed");
+        }
+        return moved;
+    };
+
     // stuck check
     float disToDest = bot->GetDistance(dest);
     // Require a meaningful improvement (5yd) to reset the stuck counter.
@@ -110,14 +152,17 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
         bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-        return bot->TeleportTo(dest);
+        bool moved = bot->TeleportTo(dest);
+        observedDecision(moved);
+        NewRpgInfo::InvalidateQuestAcquisitionRecord(observationRecord, "teleport_recovery_invalidates_travel_window");
+        return moved;
     }
 
     float dis = bot->GetExactDist(dest);
     if (dis < pathFinderDis)
     {
-        return MoveTo(dest.GetMapId(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), false, false,
-                      false, true);
+        return observedDecision(MoveTo(dest.GetMapId(), dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), false, false,
+                      false, true));
     }
 
     const uint32 typeOk = PATHFIND_NORMAL | PATHFIND_INCOMPLETE | PATHFIND_FARFROMPOLY;
@@ -148,7 +193,7 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             float endDistToDest = dest.GetExactDist(endPos.x, endPos.y, endPos.z);
             if (endDistToDest + 5.0f < disToDest)
             {
-                return MoveTo(bot->GetMapId(), endPos.x, endPos.y, endPos.z, false, false, false, true);
+                return observedDecision(MoveTo(bot->GetMapId(), endPos.x, endPos.y, endPos.z, false, false, false, true));
             }
         }
     }
@@ -190,9 +235,9 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
     }
     if (found)
     {
-        return MoveTo(bot->GetMapId(), rx, ry, rz, false, false, false, true);
+        return observedDecision(MoveTo(bot->GetMapId(), rx, ry, rz, false, false, false, true));
     }
-    return false;
+    return observedDecision(false);
 }
 
 bool NewRpgBaseAction::MoveWorldObjectTo(ObjectGuid guid, float distance)
@@ -235,6 +280,25 @@ bool NewRpgBaseAction::MoveRandomNear(float moveStep, MovementPriority priority,
     if (IsWaitingForLastMove(priority))
         return false;
 
+    uint64 const observationRecord = botAI->rpgInfo.pythonAcquisitionRecord;
+    ObjectGuid observationGuid;
+    uint64 observationSession = 0;
+    if (observationRecord)
+    {
+        observationGuid = bot->GetGUID();
+        observationSession = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    }
+    auto observedDecision = [&](bool moved) noexcept
+    {
+        if (observationRecord)
+        {
+            if (QuestRewardActorCurrent(bot, botAI, observationGuid, observationSession) && botAI->rpgInfo.pythonAcquisitionRecord == observationRecord)
+                botAI->rpgInfo.ObserveQuestAcquisition(bot, "route_decision", WorldPosition(bot), moved, 0, 0, 0, "MoveRandomNear_final_decision");
+            else NewRpgInfo::InvalidateQuestAcquisitionRecord(observationRecord, "movement_owner_changed");
+        }
+        return moved;
+    };
+
     Map* map = bot->GetMap();
     const float x = bot->GetPositionX();
     const float y = bot->GetPositionY();
@@ -268,11 +332,17 @@ bool NewRpgBaseAction::MoveRandomNear(float moveStep, MovementPriority priority,
             continue;
 
         bool moved = MoveTo(bot->GetMapId(), dx, dy, dz, false, false, false, true, priority);
+        if (observationRecord && (!QuestRewardActorCurrent(bot, botAI, observationGuid, observationSession) ||
+            botAI->rpgInfo.pythonAcquisitionRecord != observationRecord))
+        {
+            NewRpgInfo::InvalidateQuestAcquisitionRecord(observationRecord, "movement_owner_changed");
+            return moved;
+        }
         if (moved)
-            return true;
+            return observedDecision(true);
     }
 
-    return false;
+    return observedDecision(false);
 }
 
 bool NewRpgBaseAction::ForceToWait(uint32 duration, MovementPriority priority)
@@ -287,9 +357,15 @@ bool NewRpgBaseAction::ForceToWait(uint32 duration, MovementPriority priority)
 /// Quest related method refer to TalkToQuestGiverAction.h
 bool NewRpgBaseAction::InteractWithNpcOrGameObjectForQuest(ObjectGuid guid)
 {
-    WorldObject* object = ObjectAccessor::GetWorldObject(*bot, guid);
-    if (!object || !bot->CanInteractWithQuestGiver(object))
+    ObjectGuid const playerGuid = bot->GetGUID();
+    uint64 const session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session))
         return false;
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
+    WorldObject* object = ObjectAccessor::GetWorldObject(*bot, guid);
+    if (!object) return false;
+    bool interact = bot->CanInteractWithQuestGiver(object);
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) || !interact) return false;
 
     // Creature* creature = bot->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_NONE);
     // if (creature)
@@ -300,22 +376,46 @@ bool NewRpgBaseAction::InteractWithNpcOrGameObjectForQuest(ObjectGuid guid)
     // }
 
     bot->PrepareQuestMenu(guid);
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
     const QuestMenu& menu = bot->PlayerTalkClass->GetQuestMenu();
     if (menu.Empty())
         return true;
 
-    for (uint8 idx = 0; idx < menu.GetMenuItemCount(); idx++)
+    std::vector<uint32> questIds;
+    for (uint8 idx = 0; idx < menu.GetMenuItemCount(); ++idx) questIds.push_back(menu.GetItem(idx).QuestId);
+    for (uint32 questId : questIds)
     {
-        const QuestMenuItem& item = menu.GetItem(idx);
-        const Quest* quest = sObjectMgr->GetQuestTemplate(item.QuestId);
+        const Quest* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest)
             continue;
 
-        const QuestStatus& status = bot->GetQuestStatus(item.QuestId);
-        if (status == QUEST_STATUS_NONE && bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) &&
-            IsQuestWorthDoing(quest) && IsQuestCapableDoing(quest))
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+        if (botAI->rpgInfo.pythonQuestGoal && (!goal || goal->questId != questId)) continue;
+        uint64 goalRevision = botAI->rpgInfo.pythonGoalRevision;
+        const QuestStatus status = bot->GetQuestStatus(questId);
+        auto canAccept = [&]()
         {
-            AcceptQuest(quest, guid);
+            if (status != QUEST_STATUS_NONE) return false;
+            auto current = [&]() { return QuestRewardActorCurrent(bot, botAI, playerGuid, session) &&
+                botAI->rpgInfo.pythonGoalRevision == goalRevision && sObjectMgr->GetQuestTemplate(questId) == quest; };
+            bool take = bot->CanTakeQuest(quest, false);
+            if (!current() || !take) return false;
+            bool add = bot->CanAddQuest(quest, false);
+            if (!current() || !add) return false;
+            bool worth = IsQuestWorthDoing(quest);
+            if (!current() || !worth) return false;
+            bool capable = IsQuestCapableDoing(quest);
+            return current() && capable;
+        };
+        if (canAccept())
+        {
+            if (!QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+            if (botAI->rpgInfo.pythonQuestGoal && !botAI->rpgInfo.ValidatePythonQuestAcquire(bot, guid)) return false;
+            uint32 questID = quest->GetQuestId();
+            bool accepted = AcceptQuest(quest, guid);
+            if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+                sObjectMgr->GetQuestTemplate(questID) != quest) return false;
+            if (!accepted) return false;
             if (botAI->GetMaster())
                 botAI->TellMasterNoFacing(PlayerbotTextMgr::instance().GetBotTextOrDefault(
                     "new_rpg_quest_accepted",
@@ -325,9 +425,17 @@ bool NewRpgBaseAction::InteractWithNpcOrGameObjectForQuest(ObjectGuid guid)
             botAI->rpgStatistic.questAccepted++;
             LOG_DEBUG("playerbots", "[New RPG] {} accept quest {}", bot->GetName(), quest->GetQuestId());
         }
-        if (status == QUEST_STATUS_COMPLETE && bot->CanRewardQuest(quest, 0, false))
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+            botAI->rpgInfo.pythonGoalRevision != goalRevision) return false;
+        if (status == QUEST_STATUS_COMPLETE)
         {
-            TurnInQuest(quest, guid);
+            uint32 const questID = quest->GetQuestId();
+            bool rewarded = TurnInQuest(quest, guid);
+            if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+                sObjectMgr->GetQuestTemplate(questID) != quest)
+                return false;
+            if (!rewarded)
+                continue;
             if (botAI->GetMaster())
                 botAI->TellMasterNoFacing(PlayerbotTextMgr::instance().GetBotTextOrDefault(
                     "new_rpg_quest_rewarded",
@@ -466,45 +574,74 @@ bool NewRpgBaseAction::IsWithinInteractionDist(Object* questGiver)
 
 bool NewRpgBaseAction::AcceptQuest(Quest const* quest, ObjectGuid guid)
 {
+    ObjectGuid playerGuid = bot->GetGUID();
+    uint64 session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session)) return false;
+    uint32 questID = quest->GetQuestId();
+    bool pythonGoal = botAI->rpgInfo.pythonQuestGoal;
+    if (pythonGoal && !botAI->rpgInfo.ValidatePythonQuestAcquire(bot, guid)) return false;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) ||
+        quest != sObjectMgr->GetQuestTemplate(questID) || pythonGoal != botAI->rpgInfo.pythonQuestGoal) return false;
     WorldPacket p(CMSG_QUESTGIVER_ACCEPT_QUEST);
     uint32 unk1 = 0;
     p << guid << quest->GetQuestId() << unk1;
     p.rpos(0);
     bot->GetSession()->HandleQuestgiverAcceptQuestOpcode(p);
-
-    return true;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) ||
+        quest != sObjectMgr->GetQuestTemplate(questID)) return false;
+    uint8 status = bot->GetQuestStatus(questID);
+    bool acquired = bot->FindQuestSlot(questID) < MAX_QUEST_LOG_SIZE &&
+        (status == QUEST_STATUS_INCOMPLETE || status == QUEST_STATUS_COMPLETE);
+    if (pythonGoal && acquired) botAI->rpgInfo.ObserveQuestAcquisition(bot, "acquired");
+    return acquired;
 }
 
 bool NewRpgBaseAction::TurnInQuest(Quest const* quest, ObjectGuid guid)
 {
+    ObjectGuid const playerGuid = bot->GetGUID();
+    uint64 const session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session))
+        return false;
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
     uint32 questID = quest->GetQuestId();
+    bool pythonQuestGoal = botAI->rpgInfo.pythonQuestGoal;
+    if (pythonQuestGoal)
+    {
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+        if (!goal || goal->questId != questID)
+            return false;
+    }
 
     if (bot->GetQuestRewardStatus(questID))
     {
         return false;
     }
 
-    if (!bot->CanRewardQuest(quest, false))
-    {
+    auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+    bool preferredChoice = botAI->rpgInfo.pythonQuestGoal && goal && goal->rewardKind == "choice";
+    uint32 rewardIndex = preferredChoice ? goal->rewardIndex : BestRewardIndex(quest);
+    bool canReward = bot->CanRewardQuest(quest, rewardIndex, false);
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+        sObjectMgr->GetQuestTemplate(questID) != quest || pythonQuestGoal != botAI->rpgInfo.pythonQuestGoal)
         return false;
-    }
-
-    bot->PlayDistanceSound(621);
-
+    if (pythonQuestGoal) botAI->rpgInfo.ObserveQuestAcquisition(bot, "CanRewardQuest", {}, canReward);
+    if (!canReward || !botAI->rpgInfo.ValidatePythonQuestTurnIn(bot, quest, rewardIndex)) return false;
+    uint64 const acquisitionRecord = botAI->rpgInfo.pythonAcquisitionRecord;
+    if (pythonQuestGoal) botAI->rpgInfo.ObserveQuestAcquisition(bot, "turnin_begin");
+    bool wasRewarded = bot->IsQuestRewarded(questID);
     WorldPacket p(CMSG_QUESTGIVER_CHOOSE_REWARD);
-    p << guid << quest->GetQuestId();
-    if (quest->GetRewChoiceItemsCount() <= 1)
-    {
-        p << 0;
-        bot->GetSession()->HandleQuestgiverChooseRewardOpcode(p);
-    }
-    else
-    {
-        uint32 bestId = BestRewardIndex(quest);
-        p << bestId;
-        bot->GetSession()->HandleQuestgiverChooseRewardOpcode(p);
-    }
+    p << guid << quest->GetQuestId() << rewardIndex;
+    bot->GetSession()->HandleQuestgiverChooseRewardOpcode(p);
+    bool const ownerCurrent = QuestRewardActorCurrent(bot, botAI, playerGuid, session) &&
+        QuestRewardGoalCurrent(botAI, originalGoal) && sObjectMgr->GetQuestTemplate(questID) == quest;
+    if (ownerCurrent && acquisitionRecord) botAI->rpgInfo.ObserveQuestAcquisition(bot, "turnin_return");
+    NewRpgInfo::EndQuestAcquisitionTurnIn(acquisitionRecord, ownerCurrent);
+    if (!ownerCurrent) return false;
 
+    // Repeatable history has no per-attempt receipt; suppress unproved reward notifications.
+    if (wasRewarded || !bot->IsQuestRewarded(questID))
+        return false;
+    bot->PlayDistanceSound(621);
     return true;
 }
 
@@ -685,15 +822,26 @@ bool NewRpgBaseAction::OrganizeQuestLog()
 
 bool NewRpgBaseAction::SearchQuestGiverAndAcceptOrReward()
 {
-    OrganizeQuestLog();
-    if (ObjectGuid npcOrGo = ChooseNpcOrGameObjectToInteract(true, 80.0f))
+    ObjectGuid actorGuid = bot->GetGUID();
+    uint64 session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, actorGuid, session)) return false;
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
+    if (!botAI->rpgInfo.pythonQuestGoal) OrganizeQuestLog();
+    if (!QuestRewardActorCurrent(bot, botAI, actorGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+    ObjectGuid npcOrGo = ChooseNpcOrGameObjectToInteract(true, 80.0f);
+    if (!QuestRewardActorCurrent(bot, botAI, actorGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+    if (npcOrGo)
     {
         WorldObject* object = ObjectAccessor::GetWorldObject(*bot, npcOrGo);
-        if (bot->CanInteractWithQuestGiver(object))
+        if (!object) return false;
+        bool interact = bot->CanInteractWithQuestGiver(object);
+        if (!QuestRewardActorCurrent(bot, botAI, actorGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+        if (interact)
         {
-            InteractWithNpcOrGameObjectForQuest(npcOrGo);
-            ForceToWait(5000);
-            return true;
+            bool interacted = InteractWithNpcOrGameObjectForQuest(npcOrGo);
+            if (!QuestRewardActorCurrent(bot, botAI, actorGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+            if (interacted) ForceToWait(5000);
+            return interacted;
         }
         return MoveWorldObjectTo(npcOrGo);
     }
@@ -702,13 +850,19 @@ bool NewRpgBaseAction::SearchQuestGiverAndAcceptOrReward()
 
 ObjectGuid NewRpgBaseAction::ChooseNpcOrGameObjectToInteract(bool questgiverOnly, float distanceLimit)
 {
+    ObjectGuid playerGuid = bot->GetGUID();
+    uint64 session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session)) return ObjectGuid();
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
     GuidVector possibleTargets = AI_VALUE(GuidVector, "possible new rpg targets");
     GuidVector possibleGameObjects = AI_VALUE(GuidVector, "possible new rpg game objects");
 
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return ObjectGuid();
     if (possibleTargets.empty() && possibleGameObjects.empty())
         return ObjectGuid();
 
-    WorldObject* nearestObject = nullptr;
+    ObjectGuid nearestGuid;
+    float nearestDistance = 0;
     for (ObjectGuid& guid : possibleTargets)
     {
         WorldObject* object = ObjectAccessor::GetWorldObject(*bot, guid);
@@ -719,10 +873,21 @@ ObjectGuid NewRpgBaseAction::ChooseNpcOrGameObjectToInteract(bool questgiverOnly
         if (distanceLimit && bot->GetDistance(object) > distanceLimit)
             continue;
 
-        if (CanInteractWithQuestGiver(object) && HasQuestToAcceptOrReward(object))
+        bool interact = CanInteractWithQuestGiver(object);
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return ObjectGuid();
+        object = ObjectAccessor::GetWorldObject(*bot, guid);
+        if (!interact || !object || !object->IsInWorld()) continue;
+        bool hasQuest = HasQuestToAcceptOrReward(object);
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return ObjectGuid();
+        object = ObjectAccessor::GetWorldObject(*bot, guid);
+        if (hasQuest && object && object->IsInWorld())
         {
-            if (!nearestObject || bot->GetExactDist(nearestObject) > bot->GetExactDist(object))
-                nearestObject = object;
+            float distance = bot->GetExactDist(object);
+            if (!nearestGuid || nearestDistance > distance)
+            {
+                nearestGuid = guid;
+                nearestDistance = distance;
+            }
             break;
         }
     }
@@ -737,16 +902,26 @@ ObjectGuid NewRpgBaseAction::ChooseNpcOrGameObjectToInteract(bool questgiverOnly
         if (distanceLimit && bot->GetDistance(object) > distanceLimit)
             continue;
 
-        if (CanInteractWithQuestGiver(object) && HasQuestToAcceptOrReward(object))
+        bool interact = CanInteractWithQuestGiver(object);
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return ObjectGuid();
+        object = ObjectAccessor::GetWorldObject(*bot, guid);
+        if (!interact || !object || !object->IsInWorld()) continue;
+        bool hasQuest = HasQuestToAcceptOrReward(object);
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return ObjectGuid();
+        object = ObjectAccessor::GetWorldObject(*bot, guid);
+        if (hasQuest && object && object->IsInWorld())
         {
-            if (!nearestObject || bot->GetExactDist(nearestObject) > bot->GetExactDist(object))
-                nearestObject = object;
+            float distance = bot->GetExactDist(object);
+            if (!nearestGuid || nearestDistance > distance)
+            {
+                nearestGuid = guid;
+                nearestDistance = distance;
+            }
             break;
         }
     }
 
-    if (nearestObject)
-        return nearestObject->GetGUID();
+    if (nearestGuid && ObjectAccessor::GetWorldObject(*bot, nearestGuid)) return nearestGuid;
 
     // No questgiver to accept or reward
     if (questgiverOnly)
@@ -770,37 +945,70 @@ ObjectGuid NewRpgBaseAction::ChooseNpcOrGameObjectToInteract(bool questgiverOnly
 
 bool NewRpgBaseAction::HasQuestToAcceptOrReward(WorldObject* object)
 {
+    ObjectGuid const playerGuid = bot->GetGUID();
+    uint64 const session = bot->GetSession() ? bot->GetSession()->GetPartySessionIncarnation() : 0;
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session))
+        return false;
+    NewRpgInfo const originalGoal = botAI->rpgInfo;
     ObjectGuid guid = object->GetGUID();
     bot->PrepareQuestMenu(guid);
+    if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal)) return false;
     const QuestMenu& menu = bot->PlayerTalkClass->GetQuestMenu();
     if (menu.Empty())
         return false;
 
-    for (uint8 idx = 0; idx < menu.GetMenuItemCount(); idx++)
+    std::vector<uint32> questIds;
+    for (uint8 idx = 0; idx < menu.GetMenuItemCount(); ++idx) questIds.push_back(menu.GetItem(idx).QuestId);
+    for (uint32 questId : questIds)
     {
-        const QuestMenuItem& item = menu.GetItem(idx);
-        const Quest* quest = sObjectMgr->GetQuestTemplate(item.QuestId);
+        const Quest* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest)
             continue;
-        const QuestStatus& status = bot->GetQuestStatus(item.QuestId);
-        if (status == QUEST_STATUS_COMPLETE && bot->CanRewardQuest(quest, 0, false))
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+        if (botAI->rpgInfo.pythonQuestGoal && (!goal || goal->questId != questId)) continue;
+        const QuestStatus& status = bot->GetQuestStatus(questId);
+        if (status == QUEST_STATUS_COMPLETE)
         {
-            return true;
+            uint32 const questID = quest->GetQuestId();
+            bool canReward = bot->CanRewardQuest(quest, false);
+            if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+                sObjectMgr->GetQuestTemplate(questID) != quest)
+                return false;
+            if (canReward)
+                return true;
         }
     }
-    for (uint8 idx = 0; idx < menu.GetMenuItemCount(); idx++)
+    for (uint32 questId : questIds)
     {
-        const QuestMenuItem& item = menu.GetItem(idx);
-        const Quest* quest = sObjectMgr->GetQuestTemplate(item.QuestId);
+        const Quest* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest)
             continue;
 
-        const QuestStatus& status = bot->GetQuestStatus(item.QuestId);
-        if (status == QUEST_STATUS_NONE && bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) &&
-            IsQuestWorthDoing(quest) && IsQuestCapableDoing(quest))
+        auto const* goal = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data);
+        if (botAI->rpgInfo.pythonQuestGoal && (!goal || goal->questId != questId)) continue;
+        uint64 goalRevision = botAI->rpgInfo.pythonGoalRevision;
+        const QuestStatus status = bot->GetQuestStatus(questId);
+        auto canAccept = [&]()
         {
-            return true;
+            if (status != QUEST_STATUS_NONE) return false;
+            auto current = [&]() { return QuestRewardActorCurrent(bot, botAI, playerGuid, session) &&
+                botAI->rpgInfo.pythonGoalRevision == goalRevision && sObjectMgr->GetQuestTemplate(questId) == quest; };
+            bool take = bot->CanTakeQuest(quest, false);
+            if (!current() || !take) return false;
+            bool add = bot->CanAddQuest(quest, false);
+            if (!current() || !add) return false;
+            bool worth = IsQuestWorthDoing(quest);
+            if (!current() || !worth) return false;
+            bool capable = IsQuestCapableDoing(quest);
+            return current() && capable;
+        };
+        if (canAccept())
+        {
+            if (!QuestRewardGoalCurrent(botAI, originalGoal)) return false;
+            return !botAI->rpgInfo.pythonQuestGoal || botAI->rpgInfo.ValidatePythonQuestAcquire(bot, guid);
         }
+        if (!QuestRewardActorCurrent(bot, botAI, playerGuid, session) || !QuestRewardGoalCurrent(botAI, originalGoal) ||
+            botAI->rpgInfo.pythonGoalRevision != goalRevision) return false;
     }
     return false;
 }

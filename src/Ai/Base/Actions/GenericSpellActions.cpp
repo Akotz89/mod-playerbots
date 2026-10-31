@@ -20,6 +20,23 @@
 #include <ctime>
 #include <unordered_set>
 
+bool DecisionHealAction::Execute(Event event)
+{
+    ObjectGuid targetGuid = event.getObject();
+    auto dispatch = botAI->TakeDecisionHeal(targetGuid);
+    if (!dispatch)
+        return false;
+
+    Unit* target = botAI->GetUnit(targetGuid);
+    if (!target || !botAI->IsDecisionHealTarget(target->ToPlayer()))
+        return false;
+
+    // The owned receipt survives callbacks replacing the AI admission or intent.
+    SpellCastResult result = bot->CastSpell(target, 2050, TRIGGERED_NONE);
+    dispatch->result = result;
+    return result == SPELL_CAST_OK;
+}
+
 using ai::buff::BuffBelowRefreshTarget;
 using ai::buff::MakeAuraQualifierForBuff;
 using ai::spell::HasSpellOrCategoryCooldown;

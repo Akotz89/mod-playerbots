@@ -15,7 +15,7 @@ NextAction toNextAction(std::string const action)
 {
     std::vector<std::string> tokens = split(action, '!');
 
-    if (tokens[0].empty())
+    if (tokens.empty() || tokens[0].empty())
         throw std::invalid_argument("Invalid action");
 
     if (tokens.size() == 2)
@@ -54,16 +54,18 @@ CustomStrategy::CustomStrategy(PlayerbotAI* botAI) : Strategy(botAI), Qualified(
 
 void CustomStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
-    if (actionLines.empty())
+    if (!loaded)
     {
         if (actionLinesCache[qualifier].empty())
         {
-            LoadActionLines((uint32)botAI->GetBot()->GetGUID().GetCounter());
-            if (actionLines.empty())
-                LoadActionLines(0);
+            if (!Reload())
+            {
+                LOG_ERROR("playerbots", "Could not load custom strategy {}", qualifier);
+            }
         }
         else
         {
+            actionLines.clear();
             std::vector<std::string> tokens = split(actionLinesCache[qualifier], '\n');
             std::regex tpl("\\(nullptr,\\s*'.+',\\s*'(.+)'\\)(,|;)");
             for (std::vector<std::string>::iterator i = tokens.begin(); i != tokens.end(); ++i)
@@ -78,36 +80,65 @@ void CustomStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
                         actionLines.push_back(actionLine);
                 }
             }
+            loaded = true;
         }
     }
 
     for (std::vector<std::string>::iterator i = actionLines.begin(); i != actionLines.end(); ++i)
     {
-        if (TriggerNode* tn = toTriggerNode(*i))
-            triggers.push_back(tn);
+        try
+        {
+            if (TriggerNode* tn = toTriggerNode(*i))
+                triggers.push_back(tn);
+        }
+        catch (std::invalid_argument const&)
+        {
+            LOG_ERROR("playerbots", "Invalid custom strategy action line {}", *i);
+        }
     }
 }
 
-void CustomStrategy::LoadActionLines(uint32 owner)
+bool CustomStrategy::Reload()
+{
+    std::vector<std::string> lines;
+    if (!LoadActionLines((uint32)botAI->GetBot()->GetGUID().GetCounter(), lines) ||
+        (lines.empty() && !LoadActionLines(0, lines)))
+        return false;
+
+    actionLines.swap(lines);
+    loaded = true;
+    return true;
+}
+
+bool CustomStrategy::LoadActionLines(uint32 owner, std::vector<std::string>& lines)
 {
     PlayerbotsDatabasePreparedStatement* stmt =
-        PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_CUSTOM_STRATEGY_BY_OWNER_AND_NAME);
+        PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_CUSTOM_STRATEGY_COUNT_BY_OWNER_AND_NAME);
+    stmt->SetData(0, owner);
+    stmt->SetData(1, qualifier);
+    PreparedQueryResult count = PlayerbotsDatabase.Query(stmt);
+    if (!count)
+        return false;
+    uint64 expected = count->Fetch()[0].Get<uint64>();
+    if (expected == 0)
+        return true;
+
+    stmt = PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_SEL_CUSTOM_STRATEGY_BY_OWNER_AND_NAME);
     stmt->SetData(0, owner);
     stmt->SetData(1, qualifier);
     PreparedQueryResult result = PlayerbotsDatabase.Query(stmt);
-    if (result)
+    if (!result)
+        return false;
+
+    do
     {
-        do
-        {
-            Field* fields = result->Fetch();
-            std::string const action = fields[1].Get<std::string>();
-            actionLines.push_back(action);
-        } while (result->NextRow());
-    }
+        lines.push_back(result->Fetch()[1].Get<std::string>());
+    } while (result->NextRow());
+    return lines.size() == expected;
 }
 
 void CustomStrategy::Reset()
 {
-    actionLines.clear();
     actionLinesCache[qualifier].clear();
+    loaded = false;
 }

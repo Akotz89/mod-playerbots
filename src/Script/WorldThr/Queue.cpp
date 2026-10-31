@@ -63,6 +63,24 @@ void Queue::RemoveExpired()
 // Private helper methods
 void Queue::updateExistingBasket(ActionBasket* existing, ActionBasket* newBasket)
 {
+    if (newBasket->getEvent().GetAdmittedHumanOwner())
+    {
+        // Replace arguments and prerequisite state together; never attach Human authority to old Internal work.
+        if (newBasket->getRelevance() < existing->getRelevance())
+            newBasket->setRelevance(existing->getRelevance());
+        for (ActionBasket*& basket : actions)
+        {
+            if (basket == existing)
+            {
+                basket = newBasket;
+                break;
+            }
+        }
+        delete existing->getAction();
+        delete existing;
+        return;
+    }
+
     if (existing->getRelevance() < newBasket->getRelevance())
     {
         existing->setRelevance(newBasket->getRelevance());

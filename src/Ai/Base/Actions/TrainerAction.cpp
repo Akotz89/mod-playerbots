@@ -5,6 +5,9 @@
  */
 
 #include "TrainerAction.h"
+#include "OwnerLearningControl.h"
+#include "TravelMgr.h"
+#include "PlayerbotSecurity.h"
 #include "AiFactory.h"
 #include "BisListMgr.h"
 #include "BudgetValues.h"
@@ -21,12 +24,22 @@ bool TrainerAction::Execute(Event event)
 {
     std::string const param = event.getParam();
 
-    Creature* target = GetCreatureTarget();
-    if (!target)
+    if (owner_learning::Owned(botAI))
+    {
+        Player* master = botAI->GetMaster();
+        if (!master || (event.getOwner() && event.getOwner() != master) || !botAI->GetSecurity() ||
+            !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_ALLOW_ALL, true, master))
+            return false;
+    }
+    bool const automatic = event.GetSource() == "rpg trainer" && event.getParam() == "auto";
+    if (automatic && owner_learning::Owned(botAI) && !owner_learning::AutomaticTrainer(botAI))
+        return false;
+    Creature* target = automatic ? AI_VALUE(GuidPosition, "rpg target").GetCreature() : GetCreatureTarget();
+    if (!target || !bot->GetNPCIfCanInteractWith(target->GetGUID(), UNIT_NPC_FLAG_TRAINER))
         return false;
 
     Trainer::Trainer* trainer = sObjectMgr->GetTrainer(target->GetEntry());
-    if (!trainer)
+    if (!trainer || !trainer->IsTrainerValidForPlayer(bot))
         return false;
 
     // NOTE: Original version uses SpellIds here, but occasionally only inserts
@@ -34,12 +47,15 @@ bool TrainerAction::Execute(Event event)
     // spells as parameters, check SkipSpellsListAction::parseIds as an example.
     uint32 spellId = chat->parseSpell(param);
 
-    bool learnSpells = param.find("learn") != std::string::npos || sRandomPlayerbotMgr.IsRandomBot(bot) ||
+    bool const explicitLearn = param.find("learn") != std::string::npos;
+    bool learnSpells = automatic || explicitLearn || sRandomPlayerbotMgr.IsRandomBot(bot) ||
                        (sPlayerbotAIConfig.allowLearnTrainerSpells &&
                         // TODO: Rewrite to only exclude start primary profession skills and make config dependent.
                         (trainer->GetTrainerType() != Trainer::Type::Tradeskill || !IsRealPlayer(botAI->GetMaster())));
 
-    Iterate(target, learnSpells, spellId);
+    if (owner_learning::Owned(botAI) && !explicitLearn && !owner_learning::AutomaticTrainer(botAI))
+        learnSpells = false;
+    Iterate(target, learnSpells, spellId, !automatic && explicitLearn && owner_learning::Owned(botAI));
 
     return true;
 }
@@ -92,7 +108,7 @@ Creature* TrainerAction::GetCreatureTarget()
     return target ? target->ToCreature() : nullptr;
 }
 
-void TrainerAction::Iterate(Creature* creature, bool learnSpells, uint32 spellId)
+void TrainerAction::Iterate(Creature* creature, bool learnSpells, uint32 spellId, bool manualRequest)
 {
     TellHeader(creature);
 
@@ -128,7 +144,7 @@ void TrainerAction::Iterate(Creature* creature, bool learnSpells, uint32 spellId
         out << chat->FormatSpell(spellInfo) << chat->formatMoney(cost);
 
         if (learnSpells)
-            Learn(spellInfo, cost, out);
+            Learn(creature, trainerSpell->SpellId, spellInfo, cost, out, manualRequest);
 
         botAI->TellMaster(out);
     }
@@ -136,25 +152,50 @@ void TrainerAction::Iterate(Creature* creature, bool learnSpells, uint32 spellId
     TellFooter(totalCost);
 }
 
-void TrainerAction::Learn(SpellInfo const* spellInfo, uint32 cost, std::ostringstream& out)
+void TrainerAction::Learn(Creature* creature, uint32 spellId, SpellInfo const* spellInfo,
+                          uint32 cost, std::ostringstream& out, bool manualRequest)
 {
-    if (!botAI->HasCheat(BotCheatMask::gold))
+    Trainer::Trainer* trainer = sObjectMgr->GetTrainer(creature->GetEntry());
+    if (!trainer || !trainer->IsTrainerValidForPlayer(bot) ||
+        !bot->GetNPCIfCanInteractWith(creature->GetGUID(), UNIT_NPC_FLAG_TRAINER))
+        return;
+    Trainer::Spell const* trainerSpell = trainer->GetSpell(spellId);
+    if (!trainerSpell || !trainer->CanTeachSpell(bot, trainerSpell))
+        return;
+    // Budget and actual earned money are mandatory, even when a bot cheat flag exists.
+    if (AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::spells) < cost ||
+        !bot->HasEnoughMoney(cost))
     {
-        if (AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::spells) < cost)
-        {
-            out << " - too expensive";
-            return;
-        }
-
-        bot->ModifyMoney(-static_cast<int32>(cost));
+        out << " - too expensive";
+        return;
     }
-
-    if (spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL))
-        bot->CastSpell(bot, spellInfo->Id, true);
+    if (manualRequest)
+    {
+        auto const state = owner_learning::Read(botAI);
+        if (!state.valid || state.revision == UINT32_MAX)
+            return;
+        owner_learning::ManualTrainer(botAI);
+    }
+    uint32 const moneyBefore = bot->GetMoney();
+    trainer->TeachSpell(creature, bot, spellId);
+    bool learned = bot->HasSpell(spellId);
+    if (trainerSpell->IsCastable())
+    {
+        bool foundLearnedSpell = false;
+        learned = true;
+        for (SpellEffectInfo const& effect : spellInfo->GetEffects())
+            if (effect.IsEffect(SPELL_EFFECT_LEARN_SPELL) && effect.TriggerSpell)
+            {
+                foundLearnedSpell = true;
+                if (!bot->HasSpell(effect.TriggerSpell))
+                    learned = false;
+            }
+        learned = learned && foundLearnedSpell;
+    }
+    if (learned && bot->GetMoney() == moneyBefore - cost)
+        out << " - learned";
     else
-        bot->learnSpell(spellInfo->Id, false);
-
-    out << " - learned";
+        out << " - learning not confirmed";
 }
 
 void TrainerAction::TellHeader(Creature* creature)

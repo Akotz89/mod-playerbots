@@ -8,12 +8,20 @@
 #include "BroadcastHelper.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
+#include "OwnerLearningControl.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
 #include "SpellMgr.h"
+#include "Trigger.h"
 
-bool AutoMaintenanceOnLevelupAction::Execute(Event /*event*/)
+bool AutoMaintenanceOnLevelupAction::Execute(Event event)
 {
+    if (bot->IsInCombat() || bot->IsNonMeleeSpellCast(false))
+    {
+        // ProcessTriggers resets before actions run; retain this existing event until idle.
+        context->GetTrigger("levelup")->ExternalEvent(event.getPacket(), event.getOwner());
+        return false;
+    }
     AutoPickTalents();
     AutoLearnSpell();
     AutoTeleportForLevel();
@@ -36,28 +44,17 @@ void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
 
 void AutoMaintenanceOnLevelupAction::AutoPickTalents()
 {
-    if (bot->GetFreeTalentPoints() <= 0)
-        return;
-
-    if (sPlayerbotAIConfig.IsNamedPartyMember(bot))
+    if (bot->IsInCombat() || bot->IsNonMeleeSpellCast(false)) return;
+    if (bot->GetFreeTalentPoints() && owner_learning::Owned(botAI))
+        owner_learning::ContinueTalents(botAI);
+    else if (bot->GetFreeTalentPoints() && !botAI->HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(bot))
     {
-        if (!sPlayerbotAIConfig.namedPartyAutoTalents)
-            return;
-
-        int32 const specNo = sPlayerbotAIConfig.GetNamedPartySpecNo(bot);
-        if (specNo >= 0)
-        {
-            PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
-            botAI->ResetStrategies();
-        }
-        return;
+        // Preserve the separate unowned cohort's earned-only continuation.
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        factory.InitTalentsTree(true, true, false);
     }
-
-    if (!sPlayerbotAIConfig.autoPickTalents || !sRandomPlayerbotMgr.IsRandomBot(bot))
-        return;
-
+    // Pet points have their own earned budget, independent of owner points.
     PlayerbotFactory factory(bot, bot->GetLevel());
-    factory.InitTalentsTree(true, true, true);
     factory.InitPetTalents();
 }
 
@@ -79,97 +76,19 @@ void AutoMaintenanceOnLevelupAction::AutoLearnSpell()
     return;
 }
 
-void AutoMaintenanceOnLevelupAction::LearnSpells(std::ostringstream* out)
+void AutoMaintenanceOnLevelupAction::LearnSpells(std::ostringstream* /*out*/)
 {
     BroadcastHelper::BroadcastLevelup(botAI, bot);
-    bool const randomBot = sRandomPlayerbotMgr.IsRandomBot(bot);
-    bool const namedPartyBot = sPlayerbotAIConfig.IsNamedPartyMember(bot);
-
-    if (randomBot && sPlayerbotAIConfig.randomBotPersistentProgression)
-        return;
-
-    if (sPlayerbotAIConfig.namedPartyAutoLearnTrainerSpells && namedPartyBot)
-    {
-        PlayerbotFactory factory(bot, bot->GetLevel());
-        factory.InitAvailableClassSpells();
-        factory.InitClassSpells();
-    }
-    else if (sPlayerbotAIConfig.autoLearnTrainerSpells && randomBot)
-        LearnTrainerSpells(out);
-
-    if ((sPlayerbotAIConfig.autoLearnQuestSpells && randomBot) ||
-        (sPlayerbotAIConfig.namedPartyAutoLearnClassQuestSpells && namedPartyBot))
-        LearnQuestSpells(out);
+    // Trainer opportunities remain owned by the existing RPG trainer action.
+    // Native quest reward delivery is the only owner of quest spell rewards.
 }
 
 void AutoMaintenanceOnLevelupAction::LearnTrainerSpells(std::ostringstream* /*out*/)
 {
-    PlayerbotFactory factory(bot, bot->GetLevel());
-    factory.InitSkills();
-    factory.InitClassSpells();
-    factory.InitAvailableSpells();
-    factory.InitPet();
 }
 
-void AutoMaintenanceOnLevelupAction::LearnQuestSpells(std::ostringstream* out)
+void AutoMaintenanceOnLevelupAction::LearnQuestSpells(std::ostringstream* /*out*/)
 {
-    ObjectMgr::QuestMap const& questTemplates = sObjectMgr->GetQuestTemplates();
-    for (ObjectMgr::QuestMap::const_iterator i = questTemplates.begin(); i != questTemplates.end(); ++i)
-    {
-        Quest const* quest = i->second;
-
-        if (!quest->GetRequiredClasses() || quest->IsRepeatable() || quest->GetMinLevel() < 10 ||
-            quest->GetMinLevel() > bot->GetLevel())
-        {
-            continue;
-        }
-
-        if (!bot->SatisfyQuestClass(quest, false) || !bot->SatisfyQuestRace(quest, false) ||
-            !bot->SatisfyQuestSkill(quest, false))
-        {
-            continue;
-        }
-
-        int32 spellId = quest->GetRewSpellCast();
-        if (!spellId)
-            continue;
-
-        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
-        if (!spellInfo)
-            continue;
-
-        bool found = false;
-        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
-        {
-            if (spellInfo->Effects[i].Effect == SPELL_EFFECT_LEARN_SPELL && spellInfo->Effects[i].TriggerSpell &&
-                !bot->HasSpell(spellInfo->Effects[i].TriggerSpell))
-            {
-                if (SpellInfo const* triggeredInfo = sSpellMgr->GetSpellInfo(spellInfo->Effects[i].TriggerSpell))
-                    if (triggeredInfo->Effects[0].Effect == SPELL_EFFECT_TRADE_SKILL)
-                        break;
-
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-            continue;
-
-        bot->CastSpell(bot, spellId, true);
-
-        uint32 rewSpellId = quest->GetRewSpell();
-        if (rewSpellId)
-        {
-            if (SpellInfo const* rewSpellInfo = sSpellMgr->GetSpellInfo(rewSpellId))
-            {
-                *out << FormatSpell(rewSpellInfo) << ", ";
-                continue;
-            }
-        }
-
-        *out << FormatSpell(spellInfo) << ", ";
-    }
 }
 
 std::string const AutoMaintenanceOnLevelupAction::FormatSpell(SpellInfo const* sInfo)

@@ -36,7 +36,6 @@ public:
         uint8 hairColor{0};
         uint8 facialHair{0};
     };
-
     enum class NameRaceAndGender : uint8
     {
         // Generic is the category used for human & undead

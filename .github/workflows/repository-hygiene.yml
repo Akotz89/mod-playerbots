@@ -2,6 +2,7 @@ name: Repository hygiene
 on:
   pull_request:
     branches:
+      - 'codex/p10-maintained'
       - 'maintained/cpi217'
 permissions:
   contents: read

@@ -20,12 +20,14 @@ public:
     void InitTriggers(std::vector<TriggerNode*>& triggers) override;
     std::string const getName() override { return std::string("custom::" + qualifier); }
     void Reset();
+    bool Reload();
 
     static std::map<std::string, std::string> actionLinesCache;
 
 private:
     std::vector<std::string> actionLines;
-    void LoadActionLines(uint32 owner);
+    bool loaded = false;
+    bool LoadActionLines(uint32 owner, std::vector<std::string>& lines);
 };
 
 #endif
