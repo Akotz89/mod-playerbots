@@ -1,0 +1,36 @@
+name: Repository hygiene
+on:
+  pull_request:
+    branches:
+      - 'codex/p10-maintained'
+permissions:
+  contents: read
+jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check changed paths and whitespace
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          git -c diff.external= diff --no-ext-diff --no-textconv --check "$BASE_SHA" "$HEAD_SHA" --
+          git -c diff.external= diff --no-ext-diff --no-textconv --name-only --diff-filter=ACMRT -z "$BASE_SHA" "$HEAD_SHA" -- > "$RUNNER_TEMP/changed-paths"
+          while IFS= read -r -d '' path; do
+            case "/${path,,}/" in
+              */.codex/*|*/.beads/*|*/.factory/*|*/.archon/*|*/.codegraph/*|*/_bmad-output/*|*/.agents/skills/ponytail/*|*/.agents/skills/ponytail-*/*|*/.agents/skills/bmad-*/*|*/node_modules/*|*/__pycache__/*|*.pyc/|*.pyo/|/work/*)
+                printf 'Disallowed generated or agent path: %s\n' "$path" >&2
+                exit 1
+                ;;
+            esac
+          done < "$RUNNER_TEMP/changed-paths"
